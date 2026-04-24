@@ -60,9 +60,9 @@ Database includes several dependencies that are automatically included when you 
 </dependency>
 
 <dependency>
-<groupId>com.mysql</groupId>
-<artifactId>mysql-connector-j</artifactId>
-<version>9.6.0</version>
+    <groupId>com.mysql</groupId>
+    <artifactId>mysql-connector-j</artifactId>
+    <version>9.6.0</version>
 </dependency>
 ```
 
