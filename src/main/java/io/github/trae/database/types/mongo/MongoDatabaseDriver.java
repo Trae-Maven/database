@@ -81,16 +81,17 @@ public class MongoDatabaseDriver implements DatabaseDriver {
      * Queues an upsert operation for the given domain data.
      *
      * <p>Produces an {@link UpdateOneModel} with {@link UpdateOptions#upsert(boolean)}
-     * set to {@code true}, matching on {@code _id}. All properties are written
-     * as {@code $set} updates.</p>
+     * set to {@code true}. If a filter list is provided, it is used as the match
+     * condition; otherwise falls back to matching on {@code _id}.</p>
      *
      * @param database   the target database name
      * @param collection the target collection name
      * @param identifier the domain's UUID ({@code _id})
+     * @param filterList the filter conditions for matching, or empty/null to match on {@code _id}
      * @param dataMap    the property name to value map
      */
     @Override
-    public void save(final String database, final String collection, final UUID identifier, final LinkedHashMap<String, Object> dataMap) {
+    public void save(final String database, final String collection, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap) {
         final List<Bson> updates = UtilJava.createCollection(new ArrayList<>(), list -> {
             for (final Map.Entry<String, Object> entry : dataMap.entrySet()) {
                 list.add(Updates.set(entry.getKey(), entry.getValue()));
@@ -101,7 +102,7 @@ public class MongoDatabaseDriver implements DatabaseDriver {
                 database,
                 collection,
                 new UpdateOneModel<>(
-                        Filters.eq("_id", identifier),
+                        this.buildWriteFilter(identifier, filterList),
                         Updates.combine(updates),
                         new UpdateOptions().upsert(true)
                 )
@@ -111,16 +112,18 @@ public class MongoDatabaseDriver implements DatabaseDriver {
     /**
      * Queues an update operation for the specified fields only.
      *
-     * <p>Produces an {@link UpdateOneModel} without upsert, matching on {@code _id}.
-     * Only the fields present in the data map are written as {@code $set} updates.</p>
+     * <p>Produces an {@link UpdateOneModel} without upsert. If a filter list is
+     * provided, it is used as the match condition; otherwise falls back to
+     * matching on {@code _id}.</p>
      *
      * @param database   the target database name
      * @param collection the target collection name
      * @param identifier the domain's UUID ({@code _id})
+     * @param filterList the filter conditions for matching, or empty/null to match on {@code _id}
      * @param dataMap    the property name to value map of fields to update
      */
     @Override
-    public void update(final String database, final String collection, final UUID identifier, final LinkedHashMap<String, Object> dataMap) {
+    public void update(final String database, final String collection, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap) {
         final List<Bson> updates = UtilJava.createCollection(new ArrayList<>(), list -> {
             for (final Map.Entry<String, Object> entry : dataMap.entrySet()) {
                 list.add(Updates.set(entry.getKey(), entry.getValue()));
@@ -131,7 +134,7 @@ public class MongoDatabaseDriver implements DatabaseDriver {
                 database,
                 collection,
                 new UpdateOneModel<>(
-                        Filters.eq("_id", identifier),
+                        this.buildWriteFilter(identifier, filterList),
                         Updates.combine(updates)
                 )
         ));
@@ -140,16 +143,20 @@ public class MongoDatabaseDriver implements DatabaseDriver {
     /**
      * Queues a delete operation for the document with the given identifier.
      *
+     * <p>If a filter list is provided, it is used as the match condition;
+     * otherwise falls back to matching on {@code _id}.</p>
+     *
      * @param database   the target database name
      * @param collection the target collection name
      * @param identifier the domain's UUID ({@code _id})
+     * @param filterList the filter conditions for matching, or empty/null to match on {@code _id}
      */
     @Override
-    public void delete(final String database, final String collection, final UUID identifier) {
+    public void delete(final String database, final String collection, final UUID identifier, final List<Filter> filterList) {
         this.batchQueue.add(new MongoWriteOperation(
                 database,
                 collection,
-                new DeleteOneModel<>(Filters.eq("_id", identifier))
+                new DeleteOneModel<>(this.buildWriteFilter(identifier, filterList))
         ));
     }
 
@@ -374,7 +381,7 @@ public class MongoDatabaseDriver implements DatabaseDriver {
      * Creates a compound index on the target collection.
      *
      * <p>Translates each {@link IndexEntry} into an ascending or descending
-     * index key, then combines them via {@link Indexes#compoundIndex}.</p>
+     * index key, then combines them via {@link Indexes#compoundIndex(java.util.List)}.</p>
      *
      * @param databaseName the target database name
      * @param collection   the target collection name
@@ -437,6 +444,25 @@ public class MongoDatabaseDriver implements DatabaseDriver {
      */
     private LinkedHashMap<String, Object> documentToMap(final Document document) {
         return new LinkedHashMap<>(document);
+    }
+
+    /**
+     * Builds the filter for write operations (save, update, delete).
+     *
+     * <p>If the filter list is non-empty, it is compiled into a compound filter
+     * using {@link #buildFilters}. Otherwise, falls back to an {@code _id} match
+     * on the given identifier.</p>
+     *
+     * @param identifier the domain's UUID ({@code _id}), used as fallback
+     * @param filterList the filter conditions, or null/empty to match on {@code _id}
+     * @return the compiled BSON filter
+     */
+    private Bson buildWriteFilter(final UUID identifier, final List<Filter> filterList) {
+        if (filterList != null && !filterList.isEmpty()) {
+            return this.buildFilters(filterList);
+        }
+
+        return Filters.eq("_id", identifier);
     }
 
     /**

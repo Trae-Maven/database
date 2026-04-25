@@ -43,31 +43,45 @@ public interface DatabaseDriver {
     /**
      * Persists a domain's data, upserting if the identifier already exists.
      *
+     * <p>If a filter list is provided, the implementation uses it as the match
+     * condition for the upsert instead of the identifier. This enables compound
+     * key upserts (e.g. matching on {@code serverId + username} rather than
+     * {@code _id}).</p>
+     *
      * @param databaseName   the target database name
      * @param collectionName the target collection or table name
      * @param identifier     the domain's unique identifier ({@code _id})
+     * @param filterList     the filter conditions for matching, or empty/null to match on {@code _id}
      * @param dataMap        the property name to value map to persist
      */
-    void save(final String databaseName, final String collectionName, final UUID identifier, final LinkedHashMap<String, Object> dataMap);
+    void save(final String databaseName, final String collectionName, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap);
 
     /**
      * Updates specific fields on an existing document or row.
      *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param identifier     the domain's unique identifier ({@code _id})
-     * @param dataMap        the property name to value map of fields to update
-     */
-    void update(final String databaseName, final String collectionName, final UUID identifier, final LinkedHashMap<String, Object> dataMap);
-
-    /**
-     * Deletes a document or row by its identifier.
+     * <p>If a filter list is provided, the implementation uses it as the match
+     * condition for the update instead of the identifier.</p>
      *
      * @param databaseName   the target database name
      * @param collectionName the target collection or table name
      * @param identifier     the domain's unique identifier ({@code _id})
+     * @param filterList     the filter conditions for matching, or empty/null to match on {@code _id}
+     * @param dataMap        the property name to value map of fields to update
      */
-    void delete(final String databaseName, final String collectionName, final UUID identifier);
+    void update(final String databaseName, final String collectionName, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap);
+
+    /**
+     * Deletes a document or row.
+     *
+     * <p>If a filter list is provided, the implementation uses it as the match
+     * condition for the deletion instead of the identifier.</p>
+     *
+     * @param databaseName   the target database name
+     * @param collectionName the target collection or table name
+     * @param identifier     the domain's unique identifier ({@code _id})
+     * @param filterList     the filter conditions for matching, or empty/null to match on {@code _id}
+     */
+    void delete(final String databaseName, final String collectionName, final UUID identifier, final List<Filter> filterList);
 
     /**
      * Synchronously finds a single document or row by its identifier.

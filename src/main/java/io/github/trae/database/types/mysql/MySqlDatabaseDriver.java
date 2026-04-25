@@ -120,16 +120,23 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
     /**
      * Queues an upsert operation using {@code INSERT ... ON DUPLICATE KEY UPDATE}.
      *
-     * <p>Ensures the target database and table exist before queuing. Column types
-     * are inferred from the data map values on first write.</p>
+     * <p>Ensures the target database and table exist before queuing. The upsert
+     * resolves conflicts via the primary key ({@code _id}) or any unique index
+     * on the target table. All properties are written as column values, with
+     * duplicates updated to the new values.</p>
+     *
+     * <p>Note: the {@code filterList} parameter is not used by the MySQL
+     * implementation — conflict resolution is handled by the database's
+     * unique constraints. It is accepted for interface compatibility.</p>
      *
      * @param database   the target database name
      * @param collection the target table name
      * @param identifier the domain's UUID ({@code _id})
+     * @param filterList unused in MySQL; conflict resolution uses unique constraints
      * @param dataMap    the property name to value map
      */
     @Override
-    public void save(final String database, final String collection, final UUID identifier, final LinkedHashMap<String, Object> dataMap) {
+    public void save(final String database, final String collection, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap) {
         this.ensureTable(database, collection, dataMap);
 
         final List<String> columns = new ArrayList<>();
@@ -154,34 +161,58 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
     /**
      * Queues an {@code UPDATE ... SET} operation for the specified fields only.
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param identifier the domain's UUID ({@code _id})
-     * @param dataMap    the property name to value map of fields to update
-     */
-    @Override
-    public void update(final String database, final String collection, final UUID identifier, final LinkedHashMap<String, Object> dataMap) {
-        final List<Object> values = new ArrayList<>(dataMap.values());
-        values.add(identifier.toString());
-
-        final String setClause = String.join(", ", dataMap.keySet().stream().map("`%s` = ?"::formatted).toList());
-        final String sql = "UPDATE `%s`.`%s` SET %s WHERE `_id` = ?".formatted(database, collection, setClause);
-
-        this.batchQueue.add(new MySqlWriteOperation(database, sql, values));
-    }
-
-    /**
-     * Queues a {@code DELETE FROM} operation for the row with the given identifier.
+     * <p>If a filter list is provided, the update matches on those fields
+     * instead of {@code _id}.</p>
      *
      * @param database   the target database name
      * @param collection the target table name
      * @param identifier the domain's UUID ({@code _id})
+     * @param filterList the filter conditions for matching, or empty/null to match on {@code _id}
+     * @param dataMap    the property name to value map of fields to update
      */
     @Override
-    public void delete(final String database, final String collection, final UUID identifier) {
-        final String sql = "DELETE FROM `%s`.`%s` WHERE `_id` = ?".formatted(database, collection);
+    public void update(final String database, final String collection, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap) {
+        final List<Object> values = new ArrayList<>(dataMap.values());
+        final String setClause = String.join(", ", dataMap.keySet().stream().map("`%s` = ?"::formatted).toList());
 
-        this.batchQueue.add(new MySqlWriteOperation(database, sql, List.of(identifier.toString())));
+        if (filterList != null && !filterList.isEmpty()) {
+            final String where = this.buildWhereClause(filterList, values);
+            final String sql = "UPDATE `%s`.`%s` SET %s %s".formatted(database, collection, setClause, where);
+
+            this.batchQueue.add(new MySqlWriteOperation(database, sql, values));
+        } else {
+            values.add(identifier.toString());
+
+            final String sql = "UPDATE `%s`.`%s` SET %s WHERE `_id` = ?".formatted(database, collection, setClause);
+
+            this.batchQueue.add(new MySqlWriteOperation(database, sql, values));
+        }
+    }
+
+    /**
+     * Queues a {@code DELETE FROM} operation.
+     *
+     * <p>If a filter list is provided, the delete matches on those fields
+     * instead of {@code _id}.</p>
+     *
+     * @param database   the target database name
+     * @param collection the target table name
+     * @param identifier the domain's UUID ({@code _id})
+     * @param filterList the filter conditions for matching, or empty/null to match on {@code _id}
+     */
+    @Override
+    public void delete(final String database, final String collection, final UUID identifier, final List<Filter> filterList) {
+        if (filterList != null && !filterList.isEmpty()) {
+            final List<Object> values = new ArrayList<>();
+            final String where = this.buildWhereClause(filterList, values);
+            final String sql = "DELETE FROM `%s`.`%s` %s".formatted(database, collection, where);
+
+            this.batchQueue.add(new MySqlWriteOperation(database, sql, values));
+        } else {
+            final String sql = "DELETE FROM `%s`.`%s` WHERE `_id` = ?".formatted(database, collection);
+
+            this.batchQueue.add(new MySqlWriteOperation(database, sql, List.of(identifier.toString())));
+        }
     }
 
     /**

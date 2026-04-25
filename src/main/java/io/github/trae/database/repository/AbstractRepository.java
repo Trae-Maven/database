@@ -75,7 +75,7 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
      */
     @Override
     public void save(final Domain domain) {
-        this.databaseDriver.save(this.getDatabaseName(), this.getCollectionName(), domain.getId(), this.toDataMap(domain, List.of(this.getClassOfProperty().getEnumConstants())));
+        this.databaseDriver.save(this.getDatabaseName(), this.getCollectionName(), domain.getId(), this.getFiltersByDomain(domain), this.toDataMap(domain, List.of(this.getClassOfProperty().getEnumConstants())));
     }
 
     /**
@@ -86,7 +86,7 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
      */
     @Override
     public void update(final Domain domain, final List<Property> propertyList) {
-        this.databaseDriver.update(this.getDatabaseName(), this.getCollectionName(), domain.getId(), this.toDataMap(domain, propertyList));
+        this.databaseDriver.update(this.getDatabaseName(), this.getCollectionName(), domain.getId(), this.getFiltersByDomain(domain), this.toDataMap(domain, propertyList));
     }
 
     /**
@@ -96,7 +96,7 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
      */
     @Override
     public void delete(final Domain domain) {
-        this.databaseDriver.delete(this.getDatabaseName(), this.getCollectionName(), domain.getId());
+        this.databaseDriver.delete(this.getDatabaseName(), this.getCollectionName(), domain.getId(), this.getFiltersByDomain(domain));
     }
 
     /**

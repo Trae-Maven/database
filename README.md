@@ -10,6 +10,7 @@ Database eliminates boilerplate by handling serialization, deserialization, batc
 
 - **Domain mapping** — define persistable entities with a property enum and a `DomainData` constructor; the framework handles all serialization and deserialization
 - **Repository pattern** — extend `AbstractRepository` for zero-boilerplate CRUD, sync/async reads, exists, count, and index management
+- **Filter-based write matching** — override `getFiltersByDomain` to upsert, update, and delete by compound field conditions instead of `_id`, enabling one-doc-per-combination patterns (e.g. one wishlist entry per user per product)
 - **Universal filter system** — fluent `FilterBuilder` with operators (equals, greater than, in, regex, exists, etc.) that translate to native queries on any backend
 - **Query options** — sort, limit, and skip via `QueryOptions` for paginated and ordered queries
 - **Index management** — declare single and compound indexes with `.on()` chaining and `.unique()`, applied identically across MongoDB and MySQL
@@ -157,6 +158,93 @@ public class AccountRepository extends AbstractRepository<Account, AccountProper
 
 ---
 
+## Filter-Based Write Matching
+
+By default, all write operations (save, update, delete) match documents by their `_id` field. Override `getFiltersByDomain` in your repository to match on a compound set of fields instead. This enables patterns where uniqueness is defined by a combination of fields rather than a single UUID.
+
+### Example: One Wishlist Entry Per User Per Product
+
+A user can wishlist many products, but only once per product. Saving the same combination again updates the existing entry (e.g. refreshing the timestamp) rather than creating a duplicate:
+
+```java
+@Repository(databaseName = "Shop", collectionName = "Wishlists")
+public class WishlistRepository extends AbstractRepository<WishlistEntry, WishlistProperty> {
+
+    public WishlistRepository(final DatabaseDriver databaseDriver) {
+        super(databaseDriver);
+    }
+
+    @Override
+    public List<Filter> getFiltersByDomain(final WishlistEntry entry) {
+        return List.of(
+                Filter.eq(WishlistProperty.USER_ID.name(), entry.getUserId()),
+                Filter.eq(WishlistProperty.PRODUCT_ID.name(), entry.getProductId())
+        );
+    }
+
+    @Override
+    public void registerIndexes() {
+        this.addIndex(new Index()
+                .on(WishlistProperty.USER_ID.name(), SortDirection.ASCENDING)
+                .on(WishlistProperty.PRODUCT_ID.name(), SortDirection.ASCENDING)
+                .unique()
+        );
+    }
+}
+```
+
+When `save(entry)` is called, the driver matches on `USER_ID + PRODUCT_ID` instead of `_id`:
+- **If a document with that combination exists** — its fields are updated
+- **If no document matches** — a new document is inserted with a generated `_id`
+
+This works identically on both backends:
+- **MongoDB** — the filter list is compiled into a compound `Filters.and(...)` used as the match condition on the `UpdateOneModel` with upsert
+- **MySQL** — `INSERT ... ON DUPLICATE KEY UPDATE` resolves conflicts via the compound unique index declared in `registerIndexes()`
+
+### Example: One Enrolment Per Student Per Course
+
+A student can enrol in many courses, but only once per course. Subsequent saves update the enrolment status rather than duplicating:
+
+```java
+@Repository(databaseName = "University", collectionName = "Enrolments")
+public class EnrolmentRepository extends AbstractRepository<Enrolment, EnrolmentProperty> {
+
+    public EnrolmentRepository(final DatabaseDriver databaseDriver) {
+        super(databaseDriver);
+    }
+
+    @Override
+    public List<Filter> getFiltersByDomain(final Enrolment enrolment) {
+        return List.of(
+                Filter.eq(EnrolmentProperty.STUDENT_ID.name(), enrolment.getStudentId()),
+                Filter.eq(EnrolmentProperty.COURSE_ID.name(), enrolment.getCourseId())
+        );
+    }
+
+    @Override
+    public void registerIndexes() {
+        this.addIndex(new Index()
+                .on(EnrolmentProperty.STUDENT_ID.name(), SortDirection.ASCENDING)
+                .on(EnrolmentProperty.COURSE_ID.name(), SortDirection.ASCENDING)
+                .unique()
+        );
+    }
+}
+```
+
+Each student has one enrolment per course. Calling `save(enrolment)` upserts by the compound key, and `delete(enrolment)` removes that specific enrolment without affecting the student's other courses.
+
+### When to Use
+
+| Pattern | `getFiltersByDomain` | Example |
+|---|---|---|
+| One doc per entity (default) | Not overridden — matches on `_id` | Accounts, Products, Orders |
+| One doc per combination | Returns compound filters | Wishlists (user + product), Enrolments (student + course), Subscriptions (user + plan) |
+
+**Important:** When using filter-based matching, always declare a matching compound unique index in `registerIndexes()`. On MongoDB the filters handle the match directly, but on MySQL the `ON DUPLICATE KEY UPDATE` mechanism relies on the unique index to detect conflicts.
+
+---
+
 ## Driver Configuration
 
 ### MongoDB
@@ -297,7 +385,7 @@ new BatchQueue<>(100, Duration.ofSeconds(5), this::executeBatch);
 Domain (Account)
     ↕ DomainData (intermediate data carrier)
     ↕ LinkedHashMap<String, Object> (raw key-value data)
-    ↕ AbstractRepository (mapping, delegation, index management)
+    ↕ AbstractRepository (mapping, delegation, index management, filter-based matching)
     ↕ DatabaseDriver (backend-agnostic interface)
     ↕ MongoDatabaseDriver / MySqlDatabaseDriver (native driver calls)
     ↕ BatchQueue<T> (async batched execution)
@@ -308,11 +396,11 @@ Domain (Account)
 | **Domain** | Business entity with UUID identity and property-based field access |
 | **DomainProperty** | Enum defining the persistable fields on a domain |
 | **DomainData** | Intermediate carrier wrapping raw database results for typed access |
-| **AbstractRepository** | All CRUD, sync/async reads, exists, count, index management, domain mapping |
+| **AbstractRepository** | All CRUD, sync/async reads, exists, count, index management, domain mapping, filter-based write matching |
 | **@Repository** | Annotation specifying database and collection names, meta-annotated with `@Component` |
 | **DatabaseDriver** | Backend-agnostic interface for all database operations |
-| **MongoDatabaseDriver** | MongoDB implementation with `bulkWrite` batching |
-| **MySqlDatabaseDriver** | MySQL implementation with HikariCP and transactional batching |
+| **MongoDatabaseDriver** | MongoDB implementation with `bulkWrite` batching and compound filter support |
+| **MySqlDatabaseDriver** | MySQL implementation with HikariCP, transactional batching, and unique index conflict resolution |
 | **BatchQueue** | Generic async batch queue with configurable flush strategy |
 | **FilterBuilder** | Fluent API for building universal filter conditions |
 | **QueryOptions** | Sort, limit, skip wrapper for paginated queries |

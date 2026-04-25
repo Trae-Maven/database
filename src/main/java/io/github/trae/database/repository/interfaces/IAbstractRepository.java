@@ -33,6 +33,10 @@ public interface IAbstractRepository<Domain extends io.github.trae.database.doma
         return this.getClass().getAnnotation(Repository.class).collectionName();
     }
 
+    default List<Filter> getFiltersByDomain(final Domain domain) {
+        return Collections.emptyList();
+    }
+
     void save(final Domain domain);
 
     void update(final Domain domain, final List<Property> propertyList);
