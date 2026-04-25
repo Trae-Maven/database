@@ -11,6 +11,7 @@ import io.github.trae.database.index.Index;
 import io.github.trae.database.index.IndexEntry;
 import io.github.trae.database.query.QueryOptions;
 import io.github.trae.database.types.mysql.records.MySqlWriteOperation;
+import lombok.Getter;
 
 import java.sql.*;
 import java.time.Duration;
@@ -48,10 +49,7 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
 
     private static final Logger LOGGER = Logger.getLogger(MySqlDatabaseDriver.class.getName());
 
-    private final String host;
-    private final int port;
-    private final String username;
-    private final String password;
+    private final HikariConfig hikariConfig;
     private final BatchQueue<MySqlWriteOperation> batchQueue;
 
     /**
@@ -60,49 +58,27 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
      */
     private final Set<String> ensuredTables = ConcurrentHashMap.newKeySet();
 
+    @Getter
     private HikariDataSource dataSource;
 
     /**
      * Creates a new MySQL driver with batched write support.
      *
-     * @param host      the MySQL server hostname
-     * @param port      the MySQL server port
-     * @param username  the database username
-     * @param password  the database password
-     * @param batchSize the maximum number of write operations before auto-flush
-     * @param period    the flush interval; {@link Duration#ZERO} for instant mode
+     * @param hikariConfig the HikariCP connection pool configuration
+     * @param batchSize    the maximum number of write operations before auto-flush
+     * @param period       the flush interval; {@link Duration#ZERO} for instant mode
      */
-    public MySqlDatabaseDriver(final String host, final int port, final String username, final String password, final int batchSize, final Duration period) {
-        this.host = host;
-        this.port = port;
-        this.username = username;
-        this.password = password;
+    public MySqlDatabaseDriver(final HikariConfig hikariConfig, final int batchSize, final Duration period) {
+        this.hikariConfig = hikariConfig;
         this.batchQueue = new BatchQueue<>(batchSize, period, this::executeBatch);
     }
 
     /**
-     * Opens the HikariCP connection pool with tuned settings.
-     *
-     * <p>Configures prepared statement caching, server-side prepared statements,
-     * and pool sizing based on available processors.</p>
+     * Opens the HikariCP connection pool using the configured settings.
      */
     @Override
     public void connect() {
-        final HikariConfig config = new HikariConfig();
-        config.setJdbcUrl("jdbc:mysql://%s:%d".formatted(this.host, this.port));
-        config.setUsername(this.username);
-        config.setPassword(this.password);
-        config.setMaximumPoolSize(Math.max(2, Runtime.getRuntime().availableProcessors()));
-        config.setMinimumIdle(1);
-        config.setConnectionTimeout(30000);
-        config.setIdleTimeout(600000);
-        config.setMaxLifetime(1800000);
-        config.addDataSourceProperty("cachePrepStmts", "true");
-        config.addDataSourceProperty("prepStmtCacheSize", "250");
-        config.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
-        config.addDataSourceProperty("useServerPrepStmts", "true");
-
-        this.dataSource = new HikariDataSource(config);
+        this.dataSource = new HikariDataSource(this.hikariConfig);
     }
 
     /**

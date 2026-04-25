@@ -28,17 +28,7 @@ import java.util.concurrent.CompletableFuture;
  * @see io.github.trae.database.types.mongo.MongoDatabaseDriver
  * @see io.github.trae.database.types.mysql.MySqlDatabaseDriver
  */
-public interface DatabaseDriver {
-
-    /**
-     * Opens the connection to the database.
-     */
-    void connect();
-
-    /**
-     * Flushes any pending batched operations and closes the database connection.
-     */
-    void disconnect();
+public interface DatabaseDriver extends Connector {
 
     /**
      * Persists a domain's data, upserting if the identifier already exists.

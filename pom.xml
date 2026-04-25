@@ -65,6 +65,13 @@
             <artifactId>mysql-connector-j</artifactId>
             <version>9.7.0</version>
         </dependency>
+
+        <!-- Redis -->
+        <dependency>
+            <groupId>redis.clients</groupId>
+            <artifactId>jedis</artifactId>
+            <version>5.2.0</version>
+        </dependency>
     </dependencies>
 
 </project>

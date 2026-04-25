@@ -1,5 +1,6 @@
 package io.github.trae.database.types.mongo;
 
+import com.mongodb.MongoClientSettings;
 import com.mongodb.client.FindIterable;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
@@ -14,6 +15,7 @@ import io.github.trae.database.index.IndexEntry;
 import io.github.trae.database.query.QueryOptions;
 import io.github.trae.database.types.mongo.records.MongoWriteOperation;
 import io.github.trae.utilities.UtilJava;
+import lombok.Getter;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 
@@ -40,29 +42,30 @@ import java.util.concurrent.CompletableFuture;
  */
 public class MongoDatabaseDriver implements DatabaseDriver {
 
-    private final String connectionString;
+    private final MongoClientSettings mongoClientSettings;
     private final BatchQueue<MongoWriteOperation> batchQueue;
 
+    @Getter
     private MongoClient mongoClient;
 
     /**
      * Creates a new MongoDB driver with batched write support.
      *
-     * @param connectionString the MongoDB connection URI
-     * @param batchSize        the maximum number of write operations before auto-flush
-     * @param period           the flush interval; {@link Duration#ZERO} for instant mode
+     * @param mongoClientSettings the MongoDB client settings
+     * @param batchSize           the maximum number of write operations before auto-flush
+     * @param period              the flush interval; {@link Duration#ZERO} for instant mode
      */
-    public MongoDatabaseDriver(final String connectionString, final int batchSize, final Duration period) {
-        this.connectionString = connectionString;
+    public MongoDatabaseDriver(final MongoClientSettings mongoClientSettings, final int batchSize, final Duration period) {
+        this.mongoClientSettings = mongoClientSettings;
         this.batchQueue = new BatchQueue<>(batchSize, period, this::executeBatch);
     }
 
     /**
-     * Opens the connection to MongoDB using the configured connection string.
+     * Opens the connection to MongoDB using the configured client settings.
      */
     @Override
     public void connect() {
-        this.mongoClient = MongoClients.create(this.connectionString);
+        this.mongoClient = MongoClients.create(this.mongoClientSettings);
     }
 
     /**

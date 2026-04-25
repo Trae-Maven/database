@@ -1,6 +1,6 @@
 # Database
 
-A unified database abstraction layer providing annotation-driven domain mapping, repository-based CRUD operations, and multi-backend support for MongoDB and MySQL.
+A unified database abstraction layer providing annotation-driven domain mapping, repository-based CRUD operations, local/remote storage with TTL support, and multi-backend support for MongoDB, MySQL, and Redis.
 
 Database eliminates boilerplate by handling serialization, deserialization, batched writes, filtering, indexing, and async operations behind a single `DatabaseDriver` interface. Define a domain, annotate a repository, and the framework does the rest.
 
@@ -17,6 +17,10 @@ Database eliminates boilerplate by handling serialization, deserialization, batc
 - **Batched writes** — generic `BatchQueue<T>` with `ReentrantLock`-based thread safety, configurable batch size and flush interval, instant mode, and graceful shutdown with 30s termination timeout
 - **MongoDB driver** — grouped `bulkWrite` per collection, `_id` as UUID primary key, full filter/sort/index translation to native BSON
 - **MySQL driver** — HikariCP connection pooling, transactional batch execution, automatic `CREATE DATABASE`/`CREATE TABLE`, parameterized queries throughout
+- **Redis driver** — Jedis-backed connection pooling with `useResource`/`getResource` helpers for clean resource management
+- **Local storage** — `ConcurrentHashMap`-backed in-memory key-value storage with per-key TTL, lazy expiry eviction on reads, and batched background cleanup
+- **Redis storage** — Jedis-backed key-value storage with native `SETEX` TTL, `SCAN`-based iteration, and `MGET` batch retrieval
+- **Storage interface** — unified `Storage<Key, Value>` contract shared by both `LocalStorage` and `RedisStorage`, enabling drop-in swaps between local and remote caching
 
 ---
 
@@ -64,6 +68,15 @@ Database includes several dependencies that are automatically included when you 
     <groupId>com.mysql</groupId>
     <artifactId>mysql-connector-j</artifactId>
     <version>9.6.0</version>
+</dependency>
+```
+
+**Redis backend:**
+```xml
+<dependency>
+    <groupId>redis.clients</groupId>
+    <artifactId>jedis</artifactId>
+    <version>5.2.0</version>
 </dependency>
 ```
 
@@ -155,6 +168,169 @@ public class AccountRepository extends AbstractRepository<Account, AccountProper
     }
 }
 ```
+
+---
+
+## Storage
+
+The `Storage<Key, Value>` interface provides a unified contract for key-value storage with TTL support. Two implementations are included: `LocalStorage` for in-memory caching and `RedisStorage` for distributed caching via Redis.
+
+Both share the same interface, so you can swap between local and remote storage without changing your business logic.
+
+### Storage Interface
+
+```java
+public interface Storage<Key, Value> {
+
+    void put(Key key, Value value, Duration ttl);
+
+    void remove(Key key);
+
+    void update(Key previousKey, Key key, Value value, Duration ttl);
+
+    Optional<Value> get(Key key);
+
+    boolean contains(Key key);
+
+    void flush();
+
+    List<Key> getKeys();
+
+    List<Value> getValues();
+
+    int getSize();
+
+    boolean isEmpty();
+
+    void index(Value value);
+
+    void unIndex(Value value);
+}
+```
+
+### LocalStorage
+
+`ConcurrentHashMap`-backed in-memory storage with per-key TTL. Each entry is wrapped in a `Cache<Value>` object that tracks its creation time and TTL duration.
+
+**Expiry behavior:**
+
+- On `get()` — if the entry has expired, it is lazily removed and `Optional.empty()` is returned
+- On `getKeys()`, `getValues()`, `getSize()` — expired entries are filtered out of results
+- **Background eviction** — every 60 seconds (triggered on the next `get()` call), a sweep removes up to 10,000 expired entries per pass to prevent memory buildup without causing lag spikes. If more than 10,000 expired entries exist, the sweep continues on the next `get()` call immediately until all expired entries are cleaned
+- Passing a `null` TTL to `Cache` makes the entry permanent — it never expires
+
+```java
+public class ClanIdStorage extends LocalStorage<UUID, Clan> {
+
+    @Override
+    public void index(final Clan clan) {
+        this.put(clan.getId(), clan, null);  // permanent
+    }
+
+    @Override
+    public void unIndex(final Clan clan) {
+        this.remove(clan.getId());
+    }
+}
+```
+
+```java
+public class SessionStorage extends LocalStorage<UUID, Session> {
+
+    @Override
+    public void index(final Session session) {
+        this.put(session.getId(), session, Duration.ofMinutes(30));  // expires in 30 minutes
+    }
+
+    @Override
+    public void unIndex(final Session session) {
+        this.remove(session.getId());
+    }
+}
+```
+
+#### Cache
+
+The `Cache<Value>` wrapper holds the stored value alongside its TTL and creation timestamp:
+
+```java
+@AllArgsConstructor
+@Getter
+public class Cache<Value> implements ICache {
+
+    private final Value value;
+    private final Duration ttl;
+    private final long systemTime = System.currentTimeMillis();
+
+    @Override
+    public boolean isValid() {
+        if (this.getTtl() == null) {
+            return true;  // permanent entry
+        }
+
+        return !(UtilTime.elapsed(this.getSystemTime(), this.getTtl().toMillis()));
+    }
+}
+```
+
+| Field | Purpose |
+|---|---|
+| `value` | The stored object |
+| `ttl` | Time-to-live duration, or `null` for permanent entries |
+| `systemTime` | Millisecond timestamp captured at construction via `System.currentTimeMillis()` |
+| `isValid()` | Returns `true` if the TTL is `null` (permanent) or the elapsed time since creation has not exceeded the TTL |
+
+### RedisStorage
+
+Jedis-backed distributed storage with native Redis TTL via `SETEX`. Keys are automatically prefixed with a configurable namespace to avoid collisions. The `Value` type is resolved at runtime via `UtilGeneric` — no need to pass the class explicitly.
+
+**Key format:** `{redisKey}:{key}` — e.g. `clan:id:550e8400-e29b-41d4-a716-446655440000`
+
+**Operations:**
+
+| Method | Redis Command |
+|---|---|
+| `put` | `SETEX` |
+| `remove` | `DEL` |
+| `get` | `GET` + Gson deserialization |
+| `contains` | `EXISTS` |
+| `getKeys` | `SCAN` with prefix stripping |
+| `getValues` | `SCAN` + `MGET` batch retrieval |
+| `getSize` | `SCAN` count |
+| `flush` | `SCAN` + batch `DEL` |
+
+All scan-based operations use `SCAN` with a batch count of 100 instead of `KEYS` to avoid blocking the Redis server.
+
+```java
+public class ClanIdRedisStorage extends RedisStorage<Clan> {
+
+    public ClanIdRedisStorage(final RedisDatabaseDriver redisDatabaseDriver) {
+        super(redisDatabaseDriver, "clan:id");
+    }
+
+    @Override
+    public void index(final Clan clan) {
+        this.put(clan.getId().toString(), clan, Duration.ofHours(1));
+    }
+
+    @Override
+    public void unIndex(final Clan clan) {
+        this.remove(clan.getId().toString());
+    }
+}
+```
+
+### Local vs Redis Storage
+
+| | LocalStorage | RedisStorage |
+|---|---|---|
+| **Backing store** | `ConcurrentHashMap` | Redis via Jedis |
+| **TTL mechanism** | `Cache` wrapper with lazy eviction + batched background sweep | Native Redis `SETEX` |
+| **Key type** | Any object | `String` |
+| **Serialization** | None (stores Java objects directly) | Gson JSON |
+| **Scope** | Single JVM instance | Shared across all instances |
+| **Eviction** | Lazy on `get()` + batched sweep (10k/pass, every 60s) | Handled by Redis automatically |
+| **Use case** | Hot data, same-instance caching | Distributed caching, cross-instance state |
 
 ---
 
@@ -278,6 +454,24 @@ driver.connect();
 
 HikariCP connection pool with prepared statement caching and server-side prepared statements. Writes are grouped by database and executed within a single transaction per group. Tables and databases are created automatically on first write.
 
+### Redis
+
+```java
+RedisDatabaseDriver redisDriver = new RedisDatabaseDriver("localhost", 6379, "password");
+
+redisDriver.connect();
+```
+
+Jedis connection pool with configurable host, port, and password. Resource management is handled via `useResource` and `getResource` helpers that automatically acquire and release connections:
+
+```java
+// Fire-and-forget write
+redisDriver.useResource(jedis -> jedis.set("key", "value"));
+
+// Read with return value
+String value = redisDriver.getResource(jedis -> jedis.get("key"));
+```
+
 ---
 
 ## Filter System
@@ -389,6 +583,10 @@ Domain (Account)
     ↕ DatabaseDriver (backend-agnostic interface)
     ↕ MongoDatabaseDriver / MySqlDatabaseDriver (native driver calls)
     ↕ BatchQueue<T> (async batched execution)
+
+Storage<Key, Value> (unified caching interface)
+    ↕ LocalStorage (ConcurrentHashMap + Cache<Value> with per-key TTL)
+    ↕ RedisStorage (Jedis + SETEX with native Redis TTL)
 ```
 
 | Layer | Responsibility |
@@ -401,6 +599,11 @@ Domain (Account)
 | **DatabaseDriver** | Backend-agnostic interface for all database operations |
 | **MongoDatabaseDriver** | MongoDB implementation with `bulkWrite` batching and compound filter support |
 | **MySqlDatabaseDriver** | MySQL implementation with HikariCP, transactional batching, and unique index conflict resolution |
+| **RedisDatabaseDriver** | Redis implementation with Jedis connection pooling and `useResource`/`getResource` helpers |
+| **Storage** | Unified key-value storage interface with TTL support, `index`/`unIndex` for domain-aware subclassing |
+| **LocalStorage** | In-memory `ConcurrentHashMap` storage with `Cache` wrapper, lazy expiry, and batched eviction sweep |
+| **RedisStorage** | Distributed Redis storage with `SETEX` TTL, `SCAN`-based iteration, and `MGET` batch retrieval |
+| **Cache** | TTL wrapper holding value, duration, and creation timestamp with `isValid()` expiry check |
 | **BatchQueue** | Generic async batch queue with configurable flush strategy |
 | **FilterBuilder** | Fluent API for building universal filter conditions |
 | **QueryOptions** | Sort, limit, skip wrapper for paginated queries |
