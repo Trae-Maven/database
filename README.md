@@ -220,31 +220,31 @@ public interface Storage<Key, Value> {
 - Passing a `null` TTL to `Cache` makes the entry permanent — it never expires
 
 ```java
-public class ClanIdStorage extends LocalStorage<UUID, Clan> {
+public class AccountIdStorage extends LocalStorage<UUID, Account> {
 
     @Override
-    public void index(final Clan clan) {
-        this.put(clan.getId(), clan, null);  // permanent
+    public void index(final Account account) {
+        this.put(account.getId(), account);  // permanent
     }
 
     @Override
-    public void unIndex(final Clan clan) {
-        this.remove(clan.getId());
+    public void unIndex(final Account account) {
+        this.remove(account.getId());
     }
 }
 ```
 
 ```java
-public class SessionStorage extends LocalStorage<UUID, Session> {
+public class SessionTokenStorage extends LocalStorage<String, Session> {
 
     @Override
     public void index(final Session session) {
-        this.put(session.getId(), session, Duration.ofMinutes(30));  // expires in 30 minutes
+        this.put(session.getToken(), session, Duration.ofMinutes(30));  // expires in 30 minutes
     }
 
     @Override
     public void unIndex(final Session session) {
-        this.remove(session.getId());
+        this.remove(session.getToken());
     }
 }
 ```
@@ -284,7 +284,7 @@ public class Cache<Value> implements ICache {
 
 Jedis-backed distributed storage with native Redis TTL via `SETEX`. Keys are automatically prefixed with a configurable namespace to avoid collisions. The `Value` type is resolved at runtime via `UtilGeneric` — no need to pass the class explicitly.
 
-**Key format:** `{redisKey}:{key}` — e.g. `clan:id:550e8400-e29b-41d4-a716-446655440000`
+**Key format:** `{redisKey}:{key}` — e.g. `session:token:abc123def456`
 
 **Operations:**
 
@@ -302,20 +302,20 @@ Jedis-backed distributed storage with native Redis TTL via `SETEX`. Keys are aut
 All scan-based operations use `SCAN` with a batch count of 100 instead of `KEYS` to avoid blocking the Redis server.
 
 ```java
-public class ClanIdRedisStorage extends RedisStorage<Clan> {
+public class SessionTokenRedisStorage extends RedisStorage<Session> {
 
-    public ClanIdRedisStorage(final RedisDatabaseDriver redisDatabaseDriver) {
-        super(redisDatabaseDriver, "clan:id");
+    public SessionTokenRedisStorage(final RedisDatabaseDriver redisDatabaseDriver) {
+        super(redisDatabaseDriver, "session:token");
     }
 
     @Override
-    public void index(final Clan clan) {
-        this.put(clan.getId().toString(), clan, Duration.ofHours(1));
+    public void index(final Session session) {
+        this.put(session.getToken(), session, Duration.ofMinutes(30));
     }
 
     @Override
-    public void unIndex(final Clan clan) {
-        this.remove(clan.getId().toString());
+    public void unIndex(final Session session) {
+        this.remove(session.getToken());
     }
 }
 ```
@@ -426,8 +426,12 @@ Each student has one enrolment per course. Calling `save(enrolment)` upserts by 
 ### MongoDB
 
 ```java
+MongoClientSettings settings = MongoClientSettings.builder()
+        .applyConnectionString(new ConnectionString("mongodb://localhost:27017"))
+        .build();
+
 DatabaseDriver driver = new MongoDatabaseDriver(
-        "mongodb://localhost:27017",  // connection string
+        settings,                     // client settings
         100,                          // batch size
         Duration.ofSeconds(5)         // flush interval (Duration.ZERO for instant)
 );
@@ -440,13 +444,15 @@ All writes produce `WriteModel` instances collected by the `BatchQueue`. On flus
 ### MySQL
 
 ```java
+HikariConfig config = new HikariConfig();
+config.setJdbcUrl("jdbc:mysql://localhost:3306");
+config.setUsername("root");
+config.setPassword("password");
+
 DatabaseDriver driver = new MySqlDatabaseDriver(
-        "localhost",   // host
-        3306,          // port
-        "root",        // username
-        "password",    // password
-        100,           // batch size
-        Duration.ofSeconds(5)  // flush interval (Duration.ZERO for instant)
+        config,                       // HikariCP configuration
+        100,                          // batch size
+        Duration.ofSeconds(5)         // flush interval (Duration.ZERO for instant)
 );
 
 driver.connect();
@@ -457,12 +463,17 @@ HikariCP connection pool with prepared statement caching and server-side prepare
 ### Redis
 
 ```java
-RedisDatabaseDriver redisDriver = new RedisDatabaseDriver("localhost", 6379, "password");
+RedisDatabaseDriver redisDriver = new RedisDatabaseDriver(
+        new JedisPoolConfig(),        // pool configuration
+        "localhost",                  // host
+        6379,                         // port
+        "password"                    // password
+);
 
 redisDriver.connect();
 ```
 
-Jedis connection pool with configurable host, port, and password. Resource management is handled via `useResource` and `getResource` helpers that automatically acquire and release connections:
+Jedis connection pool with configurable pool settings, host, port, and password. Resource management is handled via `useResource` and `getResource` helpers that automatically acquire and release connections:
 
 ```java
 // Fire-and-forget write
