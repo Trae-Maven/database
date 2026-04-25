@@ -28,10 +28,6 @@
 
     <repositories>
         <repository>
-            <id>github-utilities</id>
-            <url>https://maven.pkg.github.com/Trae-Maven/utilities</url>
-        </repository>
-        <repository>
             <id>github-dependency-injector</id>
             <url>https://maven.pkg.github.com/Trae-Maven/dependency-injector</url>
         </repository>
@@ -43,12 +39,6 @@
             <artifactId>lombok</artifactId>
             <version>1.18.46</version>
             <scope>provided</scope>
-        </dependency>
-
-        <dependency>
-            <groupId>io.github.trae</groupId>
-            <artifactId>utilities</artifactId>
-            <version>0.0.1</version>
         </dependency>
 
         <dependency>
