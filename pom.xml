@@ -10,7 +10,7 @@
 
     <name>Database</name>
 
-    <description>A unified database abstraction layer providing annotation-driven domain mapping, repository-based CRUD operations, and multi-backend support for MongoDB and MySQL. Works alongside the dependency injector for automatic repository discovery and injection.</description>
+    <description>A unified database abstraction layer providing annotation-driven domain mapping, repository-based CRUD operations, local and distributed key-value storage with per-key TTL, and multi-backend support for MongoDB, MySQL, and Redis. Works alongside the dependency injector for automatic repository discovery and injection.</description>
 
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
