@@ -1,7 +1,7 @@
-package io.github.trae.database.local;
+package io.github.trae.database.storage;
 
 import io.github.trae.database.constants.Constants;
-import io.github.trae.database.local.interfaces.Storage;
+import io.github.trae.database.storage.interfaces.Storage;
 import io.github.trae.database.types.redis.RedisDatabaseDriver;
 import io.github.trae.utilities.UtilGeneric;
 import io.github.trae.utilities.UtilJava;

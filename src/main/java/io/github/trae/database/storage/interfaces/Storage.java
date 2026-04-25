@@ -1,4 +1,4 @@
-package io.github.trae.database.local.interfaces;
+package io.github.trae.database.storage.interfaces;
 
 import java.time.Duration;
 import java.util.List;

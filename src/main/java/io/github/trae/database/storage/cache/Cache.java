@@ -1,6 +1,6 @@
-package io.github.trae.database.local.cache;
+package io.github.trae.database.storage.cache;
 
-import io.github.trae.database.local.cache.interfaces.ICache;
+import io.github.trae.database.storage.cache.interfaces.ICache;
 import io.github.trae.utilities.UtilTime;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -8,7 +8,7 @@ import lombok.Getter;
 import java.time.Duration;
 
 /**
- * TTL-aware wrapper for cached values in {@link io.github.trae.database.local.LocalStorage}.
+ * TTL-aware wrapper for cached values in {@link io.github.trae.database.storage.LocalStorage}.
  *
  * <p>Each instance captures the stored value, an optional TTL duration, and the
  * system time at construction. The {@link #isValid()} check determines whether

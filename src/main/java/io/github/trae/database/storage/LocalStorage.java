@@ -1,7 +1,7 @@
-package io.github.trae.database.local;
+package io.github.trae.database.storage;
 
-import io.github.trae.database.local.cache.Cache;
-import io.github.trae.database.local.interfaces.Storage;
+import io.github.trae.database.storage.cache.Cache;
+import io.github.trae.database.storage.interfaces.Storage;
 import io.github.trae.utilities.UtilTime;
 
 import java.time.Duration;
