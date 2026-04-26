@@ -12,5 +12,5 @@ package io.github.trae.database.domain.models;
  * @see Domain
  * @see io.github.trae.database.domain.data.DomainData
  */
-public interface DomainProperty {
+public interface DomainProperty extends SharedDomainProperty {
 }

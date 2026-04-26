@@ -1,8 +1,11 @@
 package io.github.trae.database.types.mysql;
 
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import io.github.trae.database.batch.BatchQueue;
+import io.github.trae.database.constants.Constants;
 import io.github.trae.database.driver.DatabaseDriver;
 import io.github.trae.database.filter.Filter;
 import io.github.trae.database.filter.enums.FilterOperator;
@@ -39,7 +42,8 @@ import java.util.logging.Logger;
  *
  * <p>The {@code _id} column is a {@code VARCHAR(36)} primary key storing the
  * UUID as a string. Column types are inferred from the Java type of the first
- * value written for each field.</p>
+ * value written for each field. {@link Map} values are stored as {@code JSON}
+ * columns and automatically serialized/deserialized via {@link Gson}.</p>
  *
  * @see DatabaseDriver
  * @see BatchQueue
@@ -123,7 +127,7 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
 
         for (final Map.Entry<String, Object> entry : dataMap.entrySet()) {
             columns.add(entry.getKey());
-            values.add(entry.getValue());
+            values.add(this.toSqlValue(entry.getValue()));
         }
 
         final String columnList = String.join(", ", columns.stream().map("`%s`"::formatted).toList());
@@ -148,7 +152,7 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
      */
     @Override
     public void update(final String database, final String collection, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap) {
-        final List<Object> values = new ArrayList<>(dataMap.values());
+        final List<Object> values = new ArrayList<>(dataMap.values().stream().map(this::toSqlValue).toList());
         final String setClause = String.join(", ", dataMap.keySet().stream().map("`%s` = ?"::formatted).toList());
 
         if (filterList != null && !filterList.isEmpty()) {
@@ -646,6 +650,10 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
     /**
      * Converts a {@link ResultSet} row into a {@link LinkedHashMap}.
      *
+     * <p>{@code JSON} columns are automatically deserialized back into
+     * {@link LinkedHashMap} instances via {@link Gson}, ensuring round-trip
+     * compatibility with {@link io.github.trae.database.domain.data.DomainData}.</p>
+     *
      * @param resultSet the result set positioned on a valid row
      * @return a map of column names to their values
      * @throws SQLException if a database access error occurs
@@ -655,7 +663,13 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
         final ResultSetMetaData metaData = resultSet.getMetaData();
 
         for (int i = 1; i <= metaData.getColumnCount(); i++) {
-            map.put(metaData.getColumnName(i), resultSet.getObject(i));
+            Object value = resultSet.getObject(i);
+
+            if (metaData.getColumnTypeName(i).equalsIgnoreCase("JSON") && value instanceof final String jsonString) {
+                value = Constants.GSON.fromJson(jsonString, new TypeToken<LinkedHashMap<String, Object>>() {}.getType());
+            }
+
+            map.put(metaData.getColumnName(i), value);
         }
 
         return map;
@@ -754,10 +768,30 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
     }
 
     /**
+     * Converts a Java value to its SQL-compatible representation for prepared
+     * statement binding.
+     *
+     * <p>{@link Map} instances are serialized to JSON strings via {@link Gson},
+     * allowing sub-domain data to be stored in {@code JSON} columns. All other
+     * values are passed through unchanged.</p>
+     *
+     * @param value the Java value to convert
+     * @return the SQL-compatible value
+     */
+    private Object toSqlValue(final Object value) {
+        if (value instanceof Map<?, ?>) {
+            return Constants.GSON.toJson(value);
+        }
+
+        return value;
+    }
+
+    /**
      * Maps a Java type to the corresponding MySQL column type.
      *
      * <p>Used during automatic table creation to infer column types from
-     * the first data map written to a table.</p>
+     * the first data map written to a table. {@link Map} values are mapped
+     * to {@code JSON} columns for sub-domain storage.</p>
      *
      * @param value the Java value to map
      * @return the MySQL column type string
@@ -765,6 +799,10 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
     private String toSqlType(final Object value) {
         if (value == null) {
             return "TEXT";
+        }
+
+        if (value instanceof Map<?, ?>) {
+            return "JSON";
         }
 
         if (value instanceof String) {

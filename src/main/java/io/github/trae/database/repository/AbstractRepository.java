@@ -2,11 +2,14 @@ package io.github.trae.database.repository;
 
 import io.github.trae.database.domain.data.DomainData;
 import io.github.trae.database.domain.models.DomainProperty;
+import io.github.trae.database.domain.models.SubDomain;
+import io.github.trae.database.domain.models.SubDomainProperty;
 import io.github.trae.database.driver.DatabaseDriver;
 import io.github.trae.database.filter.Filter;
 import io.github.trae.database.index.Index;
 import io.github.trae.database.query.QueryOptions;
 import io.github.trae.database.repository.interfaces.IAbstractRepository;
+import io.github.trae.utilities.UtilGeneric;
 import io.github.trae.utilities.UtilJava;
 import lombok.AllArgsConstructor;
 
@@ -277,9 +280,9 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
     /**
      * Converts a raw database result map into a typed domain instance.
      *
-     * <p>Extracts the {@code _id} field as a {@link UUID}, wraps the remaining
-     * data in a {@link DomainData}, then reflectively invokes the domain's
-     * constructor that accepts {@code DomainData}.</p>
+     * <p>Wraps the raw map in a {@link DomainData} (which extracts the {@code _id}
+     * field internally), then reflectively invokes the domain's {@code DomainData}
+     * constructor.</p>
      *
      * @param map the raw key-value data from the database driver
      * @return the constructed domain instance
@@ -287,7 +290,7 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
      */
     private Domain toDomain(final LinkedHashMap<String, Object> map) {
         try {
-            return getClassOfDomain().getConstructor(DomainData.class).newInstance(new DomainData<>(UtilJava.cast(UUID.class, map.remove("_id")), map));
+            return getClassOfDomain().getConstructor(DomainData.class).newInstance(new DomainData<>(map));
         } catch (final Exception e) {
             throw new IllegalStateException("Failed to construct domain from DomainData", e);
         }
@@ -298,7 +301,8 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
      *
      * <p>Iterates the given property list and calls
      * {@link io.github.trae.database.domain.models.Domain#getValueByProperty}
-     * on each to build the map.</p>
+     * on each to build the map. If a property value implements {@link SubDomain},
+     * it is recursively serialized into a nested map via {@link #serializeSubDomain}.</p>
      *
      * @param domain       the domain instance to serialize
      * @param propertyList the properties to include in the map
@@ -307,7 +311,44 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
     private LinkedHashMap<String, Object> toDataMap(final Domain domain, final List<Property> propertyList) {
         return UtilJava.createMap(new LinkedHashMap<>(), map -> {
             for (final Property property : propertyList) {
-                map.put(property.name(), domain.getValueByProperty(property));
+                Object value = domain.getValueByProperty(property);
+
+                if (value instanceof final SubDomain<?> subDomain) {
+                    value = this.serializeSubDomain(subDomain);
+                }
+
+                map.put(property.name(), value);
+            }
+        });
+    }
+
+    /**
+     * Recursively serializes a {@link SubDomain} into a nested key-value map.
+     *
+     * <p>Resolves the sub-domain's property enum class reflectively via
+     * {@link UtilGeneric#getGenericParameter}, then iterates all enum constants
+     * to build the map. The {@code _id} field is included as the sub-domain's
+     * identifier. Nested sub-domains are serialized recursively.</p>
+     *
+     * @param subDomain     the sub-domain instance to serialize
+     * @param <SubProperty> the property enum type of the sub-domain
+     * @return the serialized nested data map
+     */
+    @SuppressWarnings("unchecked")
+    private <SubProperty extends Enum<?> & SubDomainProperty> LinkedHashMap<String, Object> serializeSubDomain(final SubDomain<SubProperty> subDomain) {
+        return UtilJava.createMap(new LinkedHashMap<>(), map -> {
+            map.put("_id", subDomain.getId());
+
+            final Class<SubProperty> subPropertyClass = (Class<SubProperty>) UtilGeneric.getGenericParameter(subDomain.getClass(), SubDomain.class, 0);
+
+            for (final SubProperty property : subPropertyClass.getEnumConstants()) {
+                Object value = subDomain.getValueByProperty(property);
+
+                if (value instanceof final SubDomain<?> nested) {
+                    value = this.serializeSubDomain(nested);
+                }
+
+                map.put(property.name(), value);
             }
         });
     }
