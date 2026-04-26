@@ -34,11 +34,7 @@ public interface Storage<Key, Value> {
 
     boolean isEmpty();
 
-    void index(final Value value, final Duration ttl);
-
-    default void index(final Value value) {
-        this.index(value, null);
-    }
+    void index(final Value value);
 
     void unIndex(final Value value);
 }
