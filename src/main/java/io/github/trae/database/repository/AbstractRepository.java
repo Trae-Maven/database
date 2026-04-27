@@ -364,8 +364,6 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
     @SuppressWarnings("unchecked")
     private <SubProperty extends Enum<?> & SubDomainProperty> LinkedHashMap<String, Object> serializeSubDomain(final SubDomain<SubProperty> subDomain) {
         return UtilJava.createMap(new LinkedHashMap<>(), map -> {
-            map.put("_id", subDomain.getId());
-
             final Class<SubProperty> subPropertyClass = (Class<SubProperty>) UtilGeneric.getGenericParameter(subDomain.getClass(), SubDomain.class, 0);
 
             for (final SubProperty property : subPropertyClass.getEnumConstants()) {
