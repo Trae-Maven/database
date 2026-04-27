@@ -440,13 +440,29 @@ public class MongoDatabaseDriver implements DatabaseDriver {
     }
 
     /**
-     * Converts a MongoDB {@link Document} to a {@link LinkedHashMap}.
+     * Recursively converts a MongoDB {@link Document} to a {@link LinkedHashMap},
+     * including any nested {@link Document} instances at every depth.
+     *
+     * <p>This ensures that sub-domain data stored as nested BSON documents
+     * is returned as {@link LinkedHashMap} instances, which is required by
+     * {@link io.github.trae.database.domain.data.DomainData#getSubDomainMap}
+     * for type matching during deserialization.</p>
      *
      * @param document the source document
      * @return a mutable map containing the document's key-value pairs
      */
     private LinkedHashMap<String, Object> documentToMap(final Document document) {
-        return new LinkedHashMap<>(document);
+        return UtilJava.createMap(new LinkedHashMap<>(), map -> {
+            for (final Map.Entry<String, Object> entry : document.entrySet()) {
+                Object value = entry.getValue();
+
+                if (value instanceof final Document nested) {
+                    value = this.documentToMap(nested);
+                }
+
+                map.put(entry.getKey(), value);
+            }
+        });
     }
 
     /**
