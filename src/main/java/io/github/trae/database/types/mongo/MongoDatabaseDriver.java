@@ -97,7 +97,7 @@ public class MongoDatabaseDriver implements DatabaseDriver {
     public void save(final String database, final String collection, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap) {
         final List<Bson> updates = UtilJava.createCollection(new ArrayList<>(), list -> {
             for (final Map.Entry<String, Object> entry : dataMap.entrySet()) {
-                list.add(Updates.set(entry.getKey(), entry.getValue()));
+                list.add(Updates.set(entry.getKey(), this.convertValue(entry.getValue())));
             }
         });
 
@@ -129,7 +129,7 @@ public class MongoDatabaseDriver implements DatabaseDriver {
     public void update(final String database, final String collection, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap) {
         final List<Bson> updates = UtilJava.createCollection(new ArrayList<>(), list -> {
             for (final Map.Entry<String, Object> entry : dataMap.entrySet()) {
-                list.add(Updates.set(entry.getKey(), entry.getValue()));
+                list.add(Updates.set(entry.getKey(), this.convertValue(entry.getValue())));
             }
         });
 
@@ -527,5 +527,28 @@ public class MongoDatabaseDriver implements DatabaseDriver {
             case ASCENDING -> Sorts.ascending(field);
             case DESCENDING -> Sorts.descending(field);
         };
+    }
+
+    /**
+     * Recursively converts any {@link Map} with {@link UUID} keys to use
+     * {@link String} keys, since BSON document keys must be strings.
+     *
+     * <p>Non-map values and maps with non-UUID keys are returned as-is.
+     * Nested maps are processed recursively to handle deeply nested
+     * sub-domain structures.</p>
+     *
+     * @param value the value to convert
+     * @return the converted value, or the original if no conversion is needed
+     */
+    private Object convertValue(final Object value) {
+        if (value instanceof final Map<?, ?> map && !map.isEmpty() && map.keySet().iterator().next() instanceof UUID) {
+            final LinkedHashMap<String, Object> converted = new LinkedHashMap<>();
+            for (final Map.Entry<?, ?> entry : map.entrySet()) {
+                converted.put(entry.getKey().toString(), this.convertValue(entry.getValue()));
+            }
+            return converted;
+        }
+
+        return value;
     }
 }

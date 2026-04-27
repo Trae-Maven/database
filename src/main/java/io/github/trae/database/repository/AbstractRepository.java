@@ -301,8 +301,13 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
      *
      * <p>Iterates the given property list and calls
      * {@link io.github.trae.database.domain.models.Domain#getValueByProperty}
-     * on each to build the map. If a property value implements {@link SubDomain},
-     * it is recursively serialized into a nested map via {@link #serializeSubDomain}.</p>
+     * on each to build the map. Values are serialized as follows:</p>
+     * <ul>
+     *     <li>{@link SubDomain} — recursively serialized via {@link #serializeSubDomain}</li>
+     *     <li>{@link Map} containing {@link SubDomain} values — each entry's value is
+     *         recursively serialized, preserving the original map keys</li>
+     *     <li>All other values — passed through as-is</li>
+     * </ul>
      *
      * @param domain       the domain instance to serialize
      * @param propertyList the properties to include in the map
@@ -313,13 +318,35 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
             for (final Property property : propertyList) {
                 Object value = domain.getValueByProperty(property);
 
-                if (value instanceof final SubDomain<?> subDomain) {
-                    value = this.serializeSubDomain(subDomain);
-                }
+                value = this.serializeValue(value);
 
                 map.put(property.name(), value);
             }
         });
+    }
+
+    /**
+     * Serializes a single value, handling {@link SubDomain} instances,
+     * {@link Map} values containing {@link SubDomain} entries, and
+     * {@link Collection} values containing {@link SubDomain} entries.
+     *
+     * @param value the value to serialize
+     * @return the serialized value, or the original if no serialization is needed
+     */
+    private Object serializeValue(final Object value) {
+        if (value instanceof final SubDomain<?> subDomain) {
+            return this.serializeSubDomain(subDomain);
+        }
+
+        if (value instanceof final Map<?, ?> mapValue && !mapValue.isEmpty() && mapValue.values().iterator().next() instanceof SubDomain<?>) {
+            final LinkedHashMap<Object, Object> serializedMap = new LinkedHashMap<>();
+            for (final Map.Entry<?, ?> entry : mapValue.entrySet()) {
+                serializedMap.put(entry.getKey(), this.serializeSubDomain((SubDomain<?>) entry.getValue()));
+            }
+            return serializedMap;
+        }
+
+        return value;
     }
 
     /**
