@@ -1,7 +1,6 @@
 package io.github.trae.database.types.mysql;
 
 import com.google.gson.Gson;
-import com.google.gson.reflect.TypeToken;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import io.github.trae.database.batch.BatchQueue;
@@ -650,9 +649,12 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
     /**
      * Converts a {@link ResultSet} row into a {@link LinkedHashMap}.
      *
-     * <p>{@code JSON} columns are automatically deserialized back into
-     * {@link LinkedHashMap} instances via {@link Gson}, ensuring round-trip
-     * compatibility with {@link io.github.trae.database.domain.data.DomainData}.</p>
+     * <p>{@code JSON} columns are automatically deserialized via {@link Gson}
+     * using {@code Object.class} to support both top-level maps and arrays,
+     * then recursively normalized to ensure all nested maps and list elements
+     * are returned as {@link LinkedHashMap} instances, which is required by
+     * {@link io.github.trae.database.domain.data.DomainData} for type
+     * matching during deserialization.</p>
      *
      * @param resultSet the result set positioned on a valid row
      * @return a map of column names to their values
@@ -666,13 +668,43 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
             Object value = resultSet.getObject(i);
 
             if (metaData.getColumnTypeName(i).equalsIgnoreCase("JSON") && value instanceof final String jsonString) {
-                value = Constants.GSON.fromJson(jsonString, new TypeToken<LinkedHashMap<String, Object>>() {}.getType());
+                value = this.normalizeValue(Constants.GSON.fromJson(jsonString, Object.class));
             }
 
             map.put(metaData.getColumnName(i), value);
         }
 
         return map;
+    }
+
+    /**
+     * Recursively normalizes deserialized JSON values to ensure all nested
+     * maps are {@link LinkedHashMap} instances and all list elements
+     * containing maps are also normalized.
+     *
+     * <p>Gson deserializes JSON objects as {@code LinkedTreeMap} and arrays
+     * as {@code ArrayList}, which do not match the {@link LinkedHashMap}
+     * type expected by {@link io.github.trae.database.domain.data.DomainData}.
+     * This method walks the entire structure and converts every map to
+     * {@link LinkedHashMap} at every depth.</p>
+     *
+     * @param value the value to normalize
+     * @return the normalized value
+     */
+    private Object normalizeValue(final Object value) {
+        if (value instanceof final Map<?, ?> map) {
+            final LinkedHashMap<String, Object> normalized = new LinkedHashMap<>();
+            for (final Map.Entry<?, ?> entry : map.entrySet()) {
+                normalized.put(String.valueOf(entry.getKey()), this.normalizeValue(entry.getValue()));
+            }
+            return normalized;
+        }
+
+        if (value instanceof final List<?> list) {
+            return list.stream().map(this::normalizeValue).toList();
+        }
+
+        return value;
     }
 
     /**
@@ -771,15 +803,15 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
      * Converts a Java value to its SQL-compatible representation for prepared
      * statement binding.
      *
-     * <p>{@link Map} instances are serialized to JSON strings via {@link Gson},
-     * allowing sub-domain data to be stored in {@code JSON} columns. All other
-     * values are passed through unchanged.</p>
+     * <p>{@link Map} and {@link List} instances are serialized to JSON strings
+     * via {@link Gson}, allowing sub-domain data and array fields to be stored
+     * in {@code JSON} columns. All other values are passed through unchanged.</p>
      *
      * @param value the Java value to convert
      * @return the SQL-compatible value
      */
     private Object toSqlValue(final Object value) {
-        if (value instanceof Map<?, ?>) {
+        if (value instanceof Map<?, ?> || value instanceof List<?>) {
             return Constants.GSON.toJson(value);
         }
 
@@ -790,8 +822,9 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
      * Maps a Java type to the corresponding MySQL column type.
      *
      * <p>Used during automatic table creation to infer column types from
-     * the first data map written to a table. {@link Map} values are mapped
-     * to {@code JSON} columns for sub-domain storage.</p>
+     * the first data map written to a table. {@link Map} and {@link List}
+     * values are mapped to {@code JSON} columns for sub-domain and array
+     * field storage.</p>
      *
      * @param value the Java value to map
      * @return the MySQL column type string
@@ -801,7 +834,7 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
             return "TEXT";
         }
 
-        if (value instanceof Map<?, ?>) {
+        if (value instanceof Map<?, ?> || value instanceof List<?>) {
             return "JSON";
         }
 

@@ -441,12 +441,14 @@ public class MongoDatabaseDriver implements DatabaseDriver {
 
     /**
      * Recursively converts a MongoDB {@link Document} to a {@link LinkedHashMap},
-     * including any nested {@link Document} instances at every depth.
+     * including any nested {@link Document} instances and {@link List} elements
+     * containing {@link Document} entries at every depth.
      *
-     * <p>This ensures that sub-domain data stored as nested BSON documents
-     * is returned as {@link LinkedHashMap} instances, which is required by
-     * {@link io.github.trae.database.domain.data.DomainData#getSubDomainMap}
-     * for type matching during deserialization.</p>
+     * <p>This ensures that both sub-domain data stored as nested BSON documents
+     * and array fields containing BSON documents (such as territory lists) are
+     * returned as {@link LinkedHashMap} instances, which is required by
+     * {@link io.github.trae.database.domain.data.DomainData} for type matching
+     * during deserialization.</p>
      *
      * @param document the source document
      * @return a mutable map containing the document's key-value pairs
@@ -458,6 +460,10 @@ public class MongoDatabaseDriver implements DatabaseDriver {
 
                 if (value instanceof final Document nested) {
                     value = this.documentToMap(nested);
+                } else if (value instanceof final List<?> list) {
+                    value = list.stream().map(item ->
+                            item instanceof final Document doc ? this.documentToMap(doc) : item
+                    ).toList();
                 }
 
                 map.put(entry.getKey(), value);
