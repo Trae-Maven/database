@@ -1,5 +1,6 @@
 package io.github.trae.database.repository.interfaces;
 
+import io.github.trae.database.domain.data.DomainData;
 import io.github.trae.database.domain.models.DomainProperty;
 import io.github.trae.database.filter.Filter;
 import io.github.trae.database.index.Index;
@@ -23,6 +24,10 @@ public interface IAbstractRepository<Domain extends io.github.trae.database.doma
     @SuppressWarnings("unchecked")
     default Class<Property> getClassOfProperty() {
         return (Class<Property>) UtilGeneric.getGenericParameter(this.getClass(), IAbstractRepository.class, 1);
+    }
+
+    default Class<? extends Domain> getDomainTypeByData(final DomainData<Property> domainData) {
+        return this.getClassOfDomain();
     }
 
     default String getDatabaseName() {

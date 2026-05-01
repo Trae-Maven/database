@@ -9,6 +9,7 @@ import io.github.trae.database.filter.Filter;
 import io.github.trae.database.index.Index;
 import io.github.trae.database.query.QueryOptions;
 import io.github.trae.database.repository.interfaces.IAbstractRepository;
+import io.github.trae.di.annotations.type.DependsOn;
 import io.github.trae.utilities.UtilGeneric;
 import io.github.trae.utilities.UtilJava;
 import lombok.AllArgsConstructor;
@@ -62,6 +63,7 @@ import java.util.concurrent.CompletableFuture;
  * @see DatabaseDriver
  */
 @AllArgsConstructor
+@DependsOn(values = DatabaseDriver.class)
 public abstract class AbstractRepository<Domain extends io.github.trae.database.domain.models.Domain<Property>, Property extends Enum<?> & DomainProperty> implements IAbstractRepository<Domain, Property> {
 
     private final List<Index> indexList = new ArrayList<>();
@@ -290,7 +292,9 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
      */
     private Domain toDomain(final LinkedHashMap<String, Object> map) {
         try {
-            return getClassOfDomain().getConstructor(DomainData.class).newInstance(new DomainData<>(map));
+            final DomainData<Property> domainData = new DomainData<>(map);
+
+            return this.getDomainTypeByData(domainData).getConstructor(DomainData.class).newInstance(domainData);
         } catch (final Exception e) {
             throw new IllegalStateException("Failed to construct domain from DomainData", e);
         }
