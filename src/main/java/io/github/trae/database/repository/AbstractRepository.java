@@ -81,7 +81,11 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
      */
     @Override
     public void save(final Domain domain) {
-        this.databaseDriver.save(this.getDatabaseName(), this.getCollectionName(), domain.getId(), this.getFiltersByDomain(domain), this.toDataMap(domain, List.of(this.getClassOfProperty().getEnumConstants())));
+        final LinkedHashMap<String, Object> dataMap = this.toDataMap(domain, List.of(this.getClassOfProperty().getEnumConstants()));
+
+        if (!(dataMap.isEmpty())) {
+            this.databaseDriver.save(this.getDatabaseName(), this.getCollectionName(), domain.getId(), this.getFiltersByDomain(domain), dataMap);
+        }
     }
 
     /**
@@ -92,7 +96,11 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
      */
     @Override
     public void update(final Domain domain, final List<Property> propertyList) {
-        this.databaseDriver.update(this.getDatabaseName(), this.getCollectionName(), domain.getId(), this.getFiltersByDomain(domain), this.toDataMap(domain, propertyList));
+        final LinkedHashMap<String, Object> dataMap = this.toDataMap(domain, propertyList);
+
+        if (!(dataMap.isEmpty())) {
+            this.databaseDriver.update(this.getDatabaseName(), this.getCollectionName(), domain.getId(), this.getFiltersByDomain(domain), dataMap);
+        }
     }
 
     /**
