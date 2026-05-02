@@ -1,5 +1,6 @@
 package io.github.trae.database.repository;
 
+import io.github.trae.database.constants.Constants;
 import io.github.trae.database.domain.data.DomainData;
 import io.github.trae.database.domain.models.DomainProperty;
 import io.github.trae.database.domain.models.SubDomain;
@@ -321,6 +322,9 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
         return UtilJava.createMap(new LinkedHashMap<>(), map -> {
             for (final Property property : propertyList) {
                 Object value = domain.getValueByProperty(property);
+                if (value.equals(Constants.EMPTY_PROPERTY)) {
+                    continue;
+                }
 
                 value = this.serializeValue(value);
 

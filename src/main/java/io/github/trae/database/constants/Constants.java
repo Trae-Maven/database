@@ -6,4 +6,6 @@ import com.google.gson.GsonBuilder;
 public class Constants {
 
     public static final Gson GSON = new GsonBuilder().create();
+
+    public static final String EMPTY_PROPERTY = "$EMPTY_PROPERTY$";
 }
