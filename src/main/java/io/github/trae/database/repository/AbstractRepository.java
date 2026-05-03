@@ -330,7 +330,7 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
         return UtilJava.createMap(new LinkedHashMap<>(), map -> {
             for (final Property property : propertyList) {
                 Object value = domain.getValueByProperty(property);
-                if (value.equals(Constants.EMPTY_PROPERTY)) {
+                if (Constants.EMPTY_PROPERTY.equals(value)) {
                     continue;
                 }
 
