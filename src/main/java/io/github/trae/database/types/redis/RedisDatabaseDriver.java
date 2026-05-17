@@ -67,12 +67,12 @@ public class RedisDatabaseDriver implements RedisDriver {
      * Acquires a pooled {@link Jedis} connection, passes it to the function,
      * returns the result, and releases the connection automatically.
      *
-     * @param function     the operation to execute against the Jedis connection
-     * @param <ReturnType> the return type of the operation
+     * @param function the operation to execute against the Jedis connection
+     * @param <Type>   the return type of the operation
      * @return the result of the function
      */
     @Override
-    public <ReturnType> ReturnType getResource(final Function<Jedis, ReturnType> function) {
+    public <Type> Type getResource(final Function<Jedis, Type> function) {
         try (final Jedis jedis = this.getJedisPool().getResource()) {
             return function.apply(jedis);
         }

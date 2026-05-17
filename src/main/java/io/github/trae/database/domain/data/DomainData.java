@@ -48,11 +48,11 @@ public class DomainData<Property extends Enum<?> & SharedDomainProperty> impleme
      * @param clazz        the expected return type class
      * @param property     the property to look up
      * @param defaultValue the fallback value if absent
-     * @param <ReturnType> the expected return type
+     * @param <Type> the expected return type
      * @return the cast value, or {@code defaultValue} if not present
      */
     @Override
-    public <ReturnType> ReturnType get(final Class<ReturnType> clazz, final Property property, final ReturnType defaultValue) {
+    public <Type> Type get(final Class<Type> clazz, final Property property, final Type defaultValue) {
         return UtilJava.cast(clazz, Optional.ofNullable(this.map.get(property.name())).orElse(defaultValue));
     }
 

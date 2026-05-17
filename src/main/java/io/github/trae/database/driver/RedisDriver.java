@@ -28,9 +28,9 @@ public interface RedisDriver extends Connector {
      * Acquires a pooled {@link Jedis} connection, passes it to the function,
      * returns the result, and releases the connection automatically.
      *
-     * @param function     the operation to execute against the Jedis connection
-     * @param <ReturnType> the return type of the operation
+     * @param function the operation to execute against the Jedis connection
+     * @param <Type>   the return type of the operation
      * @return the result of the function
      */
-    <ReturnType> ReturnType getResource(final Function<Jedis, ReturnType> function);
+    <Type> Type getResource(final Function<Jedis, Type> function);
 }
