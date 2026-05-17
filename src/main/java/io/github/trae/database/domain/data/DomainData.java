@@ -48,7 +48,7 @@ public class DomainData<Property extends Enum<?> & SharedDomainProperty> impleme
      * @param clazz        the expected return type class
      * @param property     the property to look up
      * @param defaultValue the fallback value if absent
-     * @param <Type> the expected return type
+     * @param <Type>       the expected return type
      * @return the cast value, or {@code defaultValue} if not present
      */
     @Override
