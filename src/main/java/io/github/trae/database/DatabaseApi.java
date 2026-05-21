@@ -1,9 +1,9 @@
 package io.github.trae.database;
 
 import io.github.trae.database.repository.AbstractRepository;
-import lombok.Getter;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -16,8 +16,16 @@ import java.util.List;
  */
 public class DatabaseApi {
 
-    @Getter
     private static final List<AbstractRepository<?, ?>> repositoryList = new ArrayList<>();
+
+    /**
+     * Returns an unmodifiable view of all registered repositories.
+     *
+     * @return the list of registered {@link AbstractRepository} instances
+     */
+    public static List<AbstractRepository<?, ?>> getRepositories() {
+        return Collections.unmodifiableList(repositoryList);
+    }
 
     /**
      * Registers a repository with the global registry.
