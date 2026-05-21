@@ -1,6 +1,7 @@
 package io.github.trae.database;
 
 import io.github.trae.database.repository.AbstractRepository;
+import lombok.Getter;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -15,6 +16,7 @@ import java.util.List;
  */
 public class DatabaseApi {
 
+    @Getter
     private static final List<AbstractRepository<?, ?>> repositoryList = new ArrayList<>();
 
     /**
