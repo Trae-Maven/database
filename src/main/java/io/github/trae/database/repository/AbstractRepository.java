@@ -1,5 +1,6 @@
 package io.github.trae.database.repository;
 
+import io.github.trae.database.DatabaseApi;
 import io.github.trae.database.constants.Constants;
 import io.github.trae.database.domain.data.DomainData;
 import io.github.trae.database.domain.models.DomainProperty;
@@ -13,7 +14,8 @@ import io.github.trae.database.repository.interfaces.IAbstractRepository;
 import io.github.trae.di.annotations.type.DependsOn;
 import io.github.trae.utilities.UtilGeneric;
 import io.github.trae.utilities.UtilJava;
-import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.Setter;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -63,13 +65,34 @@ import java.util.concurrent.CompletableFuture;
  * @see io.github.trae.database.repository.annotations.Repository
  * @see DatabaseDriver
  */
-@AllArgsConstructor
 @DependsOn(values = DatabaseDriver.class)
 public abstract class AbstractRepository<Domain extends io.github.trae.database.domain.models.Domain<Property>, Property extends Enum<?> & DomainProperty> implements IAbstractRepository<Domain, Property> {
 
     private final List<Index> indexList = new ArrayList<>();
 
     private final DatabaseDriver databaseDriver;
+
+    /**
+     * Whether this repository has completed its initial data load.
+     *
+     * <p>Defaults to {@code false} and is checked by
+     * {@link DatabaseApi#isDatabaseLoaded()} to determine global readiness.</p>
+     */
+    @Getter
+    @Setter
+    private boolean loaded;
+
+    /**
+     * Creates a new repository backed by the given driver and registers it
+     * with {@link DatabaseApi} for global readiness tracking.
+     *
+     * @param databaseDriver the driver used for all database operations
+     */
+    public AbstractRepository(final DatabaseDriver databaseDriver) {
+        this.databaseDriver = databaseDriver;
+
+        DatabaseApi.addRepository(this);
+    }
 
     /**
      * Saves the domain by serializing all properties and delegating to the driver.
