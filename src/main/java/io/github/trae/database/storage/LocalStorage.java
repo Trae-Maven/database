@@ -62,7 +62,16 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
      */
     @Override
     public void put(final Key key, final Value value, final Duration ttl) {
+        if (key == null) {
+            throw new IllegalArgumentException("Key cannot be null.");
+        }
+
         this.map.put(key, new Cache<>(value, ttl));
+    }
+
+    @Override
+    public void put(final Key key, final Value value) {
+        this.put(key, value, null);
     }
 
     /**
@@ -72,6 +81,10 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
      */
     @Override
     public void remove(final Key key) {
+        if (key == null) {
+            throw new IllegalArgumentException("Key cannot be null.");
+        }
+
         this.map.remove(key);
     }
 
@@ -86,11 +99,20 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
      */
     @Override
     public void update(final Key previousKey, final Key key, final Value value, final Duration ttl) {
-        this.map.remove(previousKey);
+        if (previousKey == null) {
+            throw new IllegalArgumentException("Previous Key cannot be null.");
+        }
+
+        this.remove(previousKey);
 
         if (key != null && value != null) {
-            this.map.put(key, new Cache<>(value, ttl));
+            this.put(key, value, ttl);
         }
+    }
+
+    @Override
+    public void update(final Key previousKey, final Key key, final Value value) {
+        this.update(previousKey, key, value, null);
     }
 
     /**
@@ -109,8 +131,13 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
      */
     @Override
     public Optional<Value> get(final Key key) {
+        if (key == null) {
+            return Optional.empty();
+        }
+
         if (UtilTime.elapsed(lastEviction, EVICTION_INTERVAL)) {
             int count = 0;
+
             final Iterator<Cache<Value>> iterator = this.map.values().iterator();
 
             while (iterator.hasNext() && count < EVICTION_BATCH_SIZE) {
@@ -144,6 +171,10 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
      */
     @Override
     public boolean contains(final Key key) {
+        if (key == null) {
+            throw new IllegalArgumentException("Key cannot be null.");
+        }
+
         return this.get(key).isPresent();
     }
 

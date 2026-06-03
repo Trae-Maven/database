@@ -8,17 +8,13 @@ public interface Storage<Key, Value> {
 
     void put(final Key key, final Value value, final Duration ttl);
 
-    default void put(final Key key, final Value value) {
-        this.put(key, value, null);
-    }
+    void put(final Key key, final Value value);
 
     void remove(final Key key);
 
     void update(final Key previousKey, final Key key, final Value value, final Duration ttl);
 
-    default void update(final Key previousKey, final Key key, final Value value) {
-        this.update(previousKey, key, value, null);
-    }
+    void update(final Key previousKey, final Key key, final Value value);
 
     Optional<Value> get(final Key key);
 

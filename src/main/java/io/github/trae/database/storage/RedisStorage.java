@@ -5,8 +5,10 @@ import io.github.trae.database.storage.interfaces.Storage;
 import io.github.trae.database.types.redis.RedisDatabaseDriver;
 import io.github.trae.utilities.UtilGeneric;
 import io.github.trae.utilities.UtilJava;
+import io.github.trae.utilities.UtilString;
 import lombok.AllArgsConstructor;
 import redis.clients.jedis.params.ScanParams;
+import redis.clients.jedis.params.SetParams;
 import redis.clients.jedis.resps.ScanResult;
 
 import java.time.Duration;
@@ -16,7 +18,7 @@ import java.util.Optional;
 
 /**
  * Jedis-backed distributed implementation of {@link Storage} with native Redis TTL
- * via {@code SETEX}.
+ * via {@code SET ... EX}.
  *
  * <p>Keys are automatically prefixed with a configurable namespace using the format
  * {@code {redisKey}:{key}} to avoid collisions across different storage instances.
@@ -39,15 +41,31 @@ public abstract class RedisStorage<Value> implements Storage<String, Value> {
     private final String redisKey;
 
     /**
-     * Stores a value in Redis with the given TTL using {@code SETEX}.
+     * Stores a value in Redis. When a TTL is provided it is applied natively via
+     * {@code SET ... EX}; a {@code null} TTL stores the value without expiry.
      *
      * @param key   the key to store under (will be prefixed with {@link #redisKey})
      * @param value the value to store (serialized to JSON)
-     * @param ttl   the time-to-live duration
+     * @param ttl   the time-to-live duration, or {@code null} for no expiry
      */
     @Override
     public void put(final String key, final Value value, final Duration ttl) {
-        this.redisDatabaseDriver.useResource(jedis -> jedis.setex(this.key(key), ttl.toSeconds(), Constants.GSON.toJson(value)));
+        if (key == null) {
+            throw new IllegalArgumentException("Key cannot be null.");
+        }
+
+        this.redisDatabaseDriver.useResource(jedis -> {
+            if (ttl == null) {
+                jedis.set(this.key(key), Constants.GSON.toJson(value));
+            } else {
+                jedis.set(this.key(key), Constants.GSON.toJson(value), SetParams.setParams().ex(ttl.toSeconds()));
+            }
+        });
+    }
+
+    @Override
+    public void put(final String key, final Value value) {
+        this.put(key, value, null);
     }
 
     /**
@@ -57,28 +75,46 @@ public abstract class RedisStorage<Value> implements Storage<String, Value> {
      */
     @Override
     public void remove(final String key) {
+        if (key == null) {
+            throw new IllegalArgumentException("Key cannot be null.");
+        }
+
         this.redisDatabaseDriver.useResource(jedis -> jedis.del(this.key(key)));
     }
 
     /**
      * Replaces an entry under a new key. Deletes the previous key first, then
-     * stores the value under the new key with {@code SETEX} if both key and
-     * value are non-null.
+     * stores the value under the new key if both key and value are non-null,
+     * applying the TTL via {@code SET ... EX} when provided. The delete and set
+     * run on a single connection but are two separate commands, not a transaction.
      *
      * @param previousKey the old key to delete
      * @param key         the new key to store under
      * @param value       the value to store (serialized to JSON)
-     * @param ttl         the time-to-live duration
+     * @param ttl         the time-to-live duration, or {@code null} for no expiry
      */
     @Override
     public void update(final String previousKey, final String key, final Value value, final Duration ttl) {
+        if (previousKey == null) {
+            throw new IllegalArgumentException("Previous Key cannot be null.");
+        }
+
         this.redisDatabaseDriver.useResource(jedis -> {
             jedis.del(this.key(previousKey));
 
             if (key != null && value != null) {
-                jedis.setex(this.key(key), ttl.toSeconds(), Constants.GSON.toJson(value));
+                if (ttl == null) {
+                    jedis.set(this.key(key), Constants.GSON.toJson(value));
+                } else {
+                    jedis.set(this.key(key), Constants.GSON.toJson(value), SetParams.setParams().ex(ttl.toSeconds()));
+                }
             }
         });
+    }
+
+    @Override
+    public void update(final String previousKey, final String key, final Value value) {
+        this.update(previousKey, key, value, null);
     }
 
     /**
@@ -93,6 +129,10 @@ public abstract class RedisStorage<Value> implements Storage<String, Value> {
     @SuppressWarnings("unchecked")
     @Override
     public Optional<Value> get(final String key) {
+        if (UtilString.isEmpty(key)) {
+            return Optional.empty();
+        }
+
         return this.redisDatabaseDriver.getResource(jedis -> Optional.ofNullable(jedis.get(this.key(key))).map(value -> Constants.GSON.fromJson(value, (Class<Value>) UtilGeneric.getGenericParameter(this.getClass(), RedisStorage.class, 1))));
     }
 
@@ -104,6 +144,10 @@ public abstract class RedisStorage<Value> implements Storage<String, Value> {
      */
     @Override
     public boolean contains(final String key) {
+        if (UtilString.isEmpty(key)) {
+            throw new IllegalArgumentException("Key cannot be null or empty.");
+        }
+
         return this.redisDatabaseDriver.getResource(jedis -> jedis.exists(this.key(key)));
     }
 
