@@ -1,6 +1,7 @@
 package io.github.trae.database.driver;
 
 import redis.clients.jedis.Jedis;
+import redis.clients.jedis.UnifiedJedis;
 
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -22,7 +23,7 @@ public interface RedisDriver extends Connector {
      *
      * @param consumer the operation to execute against the Jedis connection
      */
-    void useResource(final Consumer<Jedis> consumer);
+    void useResource(final Consumer<UnifiedJedis> consumer);
 
     /**
      * Acquires a pooled {@link Jedis} connection, passes it to the function,
@@ -32,5 +33,5 @@ public interface RedisDriver extends Connector {
      * @param <Type>   the return type of the operation
      * @return the result of the function
      */
-    <Type> Type getResource(final Function<Jedis, Type> function);
+    <Type> Type getResource(final Function<UnifiedJedis, Type> function);
 }
