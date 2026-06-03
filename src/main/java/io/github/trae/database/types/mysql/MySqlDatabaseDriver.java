@@ -99,19 +99,30 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
     /**
      * Queues an upsert operation using {@code INSERT ... ON DUPLICATE KEY UPDATE}.
      *
-     * <p>Ensures the target database and table exist before queuing. The upsert
-     * resolves conflicts via the primary key ({@code _id}) or any unique index
-     * on the target table. All properties are written as column values, with
-     * duplicates updated to the new values.</p>
+     * <p>Ensures the target database and table exist before queuing. Conflict
+     * resolution is performed by the database against the primary key ({@code _id})
+     * or any {@code UNIQUE} index on the target table — on a collision the matched
+     * row's columns are updated to the new values, otherwise a new row is inserted.</p>
      *
-     * <p>Note: the {@code filterList} parameter is not used by the MySQL
-     * implementation — conflict resolution is handled by the database's
-     * unique constraints. It is accepted for interface compatibility.</p>
+     * <p>The {@code filterList} is used to <b>seed the inserted row's columns</b> for
+     * compound-key upserts. Each {@link FilterOperator#EQUALS} filter contributes its
+     * field/value to the {@code INSERT} (unless that field is already present in
+     * {@code dataMap}), ensuring that the columns backing the unique index are
+     * populated on a first insert. Non-{@code EQUALS} filters are ignored, as they
+     * cannot supply a concrete starting value.</p>
+     *
+     * <p><b>Requirement:</b> for the upsert to actually match on the filter fields
+     * (rather than only on {@code _id}), the target table must have a {@code UNIQUE}
+     * index over those fields — e.g. {@code UNIQUE(serverId, username)}. Without it,
+     * MySQL has no constraint to collide on and every {@code save} inserts a new row.
+     * The auto-created table only declares {@code _id} as its primary key, so any
+     * required compound-unique index must be created separately via
+     * {@link #createIndex}.</p>
      *
      * @param database   the target database name
      * @param collection the target table name
      * @param identifier the domain's UUID ({@code _id})
-     * @param filterList unused in MySQL; conflict resolution uses unique constraints
+     * @param filterList the compound-key fields to seed on insert ({@code EQUALS} filters only), or empty/null for an {@code _id}-only upsert
      * @param dataMap    the property name to value map
      */
     @Override
@@ -123,6 +134,15 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
 
         columns.add("_id");
         values.add(identifier.toString());
+
+        if (filterList != null) {
+            for (final Filter filter : filterList) {
+                if (filter.getOperator() == FilterOperator.EQUALS && !dataMap.containsKey(filter.getField()) && !columns.contains(filter.getField())) {
+                    columns.add(filter.getField());
+                    values.add(this.toSqlValue(filter.getValue()));
+                }
+            }
+        }
 
         for (final Map.Entry<String, Object> entry : dataMap.entrySet()) {
             columns.add(entry.getKey());
