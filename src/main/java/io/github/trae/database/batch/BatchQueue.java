@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -30,11 +31,14 @@ import java.util.logging.Logger;
  * </ul>
  *
  * <p>Thread safety is provided by a {@link ReentrantLock} guarding all queue access.
- * Flush execution is dispatched to a fixed thread pool with daemon threads, sized
- * to half the available processors.</p>
+ * Flush execution is dispatched to a single-threaded executor with a daemon thread,
+ * so batches are processed strictly in the order they are drained — batch N completes
+ * before batch N+1 begins. This preserves write ordering for non-commutative operations
+ * on the same document across separate batches, and provides natural backpressure under
+ * sustained load.</p>
  *
- * <p>On {@link #shutdown()}, the scheduler is stopped, remaining items are flushed
- * synchronously on the calling thread, and the executor awaits termination for
+ * <p>On {@link #shutdown()}, the scheduler is stopped and awaited, remaining items are
+ * flushed synchronously on the calling thread, and the executor awaits termination for
  * up to 30 seconds before forcing shutdown.</p>
  *
  * @param <T> the type of operation to batch
@@ -67,8 +71,7 @@ public class BatchQueue<T> implements IBatchQueue<T> {
         this.instant = period.isZero();
         this.flushConsumer = flushConsumer;
 
-        this.executorService = Executors.newFixedThreadPool(
-                Math.max(1, Runtime.getRuntime().availableProcessors() / 2),
+        this.executorService = Executors.newSingleThreadExecutor(
                 runnable -> {
                     final Thread thread = new Thread(runnable, "batch-queue-worker");
                     thread.setDaemon(true);
@@ -119,10 +122,16 @@ public class BatchQueue<T> implements IBatchQueue<T> {
      * Manually triggers a flush of all currently queued operations.
      *
      * <p>The batch is drained and dispatched to the executor for async processing.
-     * Also called automatically by the scheduled executor in batched mode.</p>
+     * Also called automatically by the scheduled executor in batched mode. Has no
+     * effect once {@link #shutdown()} has been called, since shutdown performs its
+     * own final flush and the executor is no longer accepting tasks.</p>
      */
     @Override
     public void flush() {
+        if (this.shutdown.get()) {
+            return;
+        }
+
         this.lock.lock();
         try {
             this.drainAndExecute();
@@ -136,7 +145,8 @@ public class BatchQueue<T> implements IBatchQueue<T> {
      *
      * <p>Execution order:</p>
      * <ol>
-     *     <li>Stops the scheduled executor (if batched mode)</li>
+     *     <li>Stops the scheduled executor and awaits its termination, so no scheduled
+     *     flush can run concurrently with the final flush below</li>
      *     <li>Drains remaining items and flushes them synchronously on the calling thread</li>
      *     <li>Shuts down the worker executor and awaits termination for up to 30 seconds</li>
      *     <li>Forces shutdown if termination times out</li>
@@ -152,6 +162,15 @@ public class BatchQueue<T> implements IBatchQueue<T> {
 
         if (this.scheduledExecutorService != null) {
             this.scheduledExecutorService.shutdown();
+
+            try {
+                if (!(this.scheduledExecutorService.awaitTermination(5, TimeUnit.SECONDS))) {
+                    this.scheduledExecutorService.shutdownNow();
+                }
+            } catch (final InterruptedException e) {
+                this.scheduledExecutorService.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
         }
 
         // Final synchronous flush on calling thread
@@ -205,9 +224,13 @@ public class BatchQueue<T> implements IBatchQueue<T> {
     /**
      * Drains the queue into a local list and dispatches it to the executor.
      *
-     * <p>Must be called while holding {@link #lock}. Each operation within
-     * the batch is executed safely — a failure in one does not prevent
-     * the rest from processing.</p>
+     * <p>Must be called while holding {@link #lock}. The batch is submitted to the
+     * single-threaded executor, so batches run strictly in drain order. A failure
+     * within {@link #flushConsumer} is logged and does not affect later batches.</p>
+     *
+     * <p>If the executor rejects the task — which can only happen during the narrow
+     * window of {@link #shutdown()} — the batch is executed inline on the calling
+     * thread so its operations are not lost.</p>
      */
     private void drainAndExecute() {
         if (this.queue.isEmpty()) {
@@ -217,12 +240,20 @@ public class BatchQueue<T> implements IBatchQueue<T> {
         final List<T> operations = new ArrayList<>(this.queue);
         this.queue.clear();
 
-        this.executorService.execute(() -> {
+        try {
+            this.executorService.execute(() -> {
+                try {
+                    this.flushConsumer.accept(operations);
+                } catch (final Exception e) {
+                    LOGGER.log(Level.SEVERE, "BatchQueue flush failed", e);
+                }
+            });
+        } catch (final RejectedExecutionException e) {
             try {
                 this.flushConsumer.accept(operations);
-            } catch (final Exception e) {
-                LOGGER.log(Level.SEVERE, "BatchQueue flush failed", e);
+            } catch (final Exception inner) {
+                LOGGER.log(Level.SEVERE, "BatchQueue inline flush failed", inner);
             }
-        });
+        }
     }
 }
