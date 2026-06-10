@@ -43,7 +43,9 @@ import java.util.logging.Logger;
  * <p>All write operations ({@link #save}, {@link #update}, {@link #delete}) produce
  * {@link MySqlWriteOperation} instances that are collected by a {@link BatchQueue}.
  * On flush, operations are grouped by database, then executed within a single
- * transaction per group ({@code autoCommit=false} → {@code commit}).</p>
+ * transaction per group ({@code autoCommit=false} → {@code commit}). Within a
+ * transaction, consecutive operations sharing identical SQL are executed as a
+ * single JDBC batch via {@link PreparedStatement#addBatch()}.</p>
  *
  * <p>Tables and databases are created automatically on first write via
  * {@code CREATE TABLE IF NOT EXISTS} and {@code CREATE DATABASE IF NOT EXISTS},
@@ -229,7 +231,14 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
      *
      * <p>Operations are grouped by database name. Each group executes within a
      * single transaction — {@code autoCommit} is disabled, all statements execute,
-     * then the connection is committed.</p>
+     * then the connection is committed. Consecutive operations sharing identical
+     * SQL are coalesced into a single {@link PreparedStatement} using JDBC batch
+     * execution ({@link PreparedStatement#addBatch()} /
+     * {@link PreparedStatement#executeBatch()}), preserving operation order while
+     * minimizing round trips.</p>
+     *
+     * <p>On failure the transaction is explicitly rolled back before the connection
+     * is returned to the pool, so no partial group is committed.</p>
      *
      * @param operations the batch of write operations to execute
      */
@@ -244,19 +253,59 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
             try (final Connection connection = this.dataSource.getConnection()) {
                 connection.setAutoCommit(false);
 
-                for (final MySqlWriteOperation operation : entry.getValue()) {
-                    try (final PreparedStatement statement = connection.prepareStatement(operation.sql())) {
-                        for (int i = 0; i < operation.values().size(); i++) {
-                            statement.setObject(i + 1, operation.values().get(i));
-                        }
-                        statement.executeUpdate();
+                try {
+                    this.executeGroup(connection, entry.getValue());
+
+                    connection.commit();
+                } catch (final SQLException e) {
+                    connection.rollback();
+
+                    LOGGER.log(Level.SEVERE, "MySQL batch execution failed, rolled back", e);
+                }
+            } catch (final SQLException e) {
+                LOGGER.log(Level.SEVERE, "MySQL batch connection failed", e);
+            }
+        }
+    }
+
+    /**
+     * Executes an ordered list of operations on the given connection, coalescing
+     * runs of identical SQL into a single JDBC batch.
+     *
+     * <p>A run is flushed whenever the next operation's SQL differs from the
+     * current run's SQL, preserving the overall execution order of the group.</p>
+     *
+     * @param connection the active transactional connection
+     * @param operations the ordered operations to execute
+     * @throws SQLException if a statement fails to execute
+     */
+    private void executeGroup(final Connection connection, final List<MySqlWriteOperation> operations) throws SQLException {
+        int index = 0;
+
+        while (index < operations.size()) {
+            final String sql = operations.get(index).sql();
+
+            int end = index;
+
+            while (end < operations.size() && operations.get(end).sql().equals(sql)) {
+                end++;
+            }
+
+            try (final PreparedStatement statement = connection.prepareStatement(sql)) {
+                for (int i = index; i < end; i++) {
+                    final List<Object> operationValues = operations.get(i).values();
+
+                    for (int v = 0; v < operationValues.size(); v++) {
+                        statement.setObject(v + 1, operationValues.get(v));
                     }
+
+                    statement.addBatch();
                 }
 
-                connection.commit();
-            } catch (final SQLException e) {
-                LOGGER.log(Level.SEVERE, "MySQL batch execution failed", e);
+                statement.executeBatch();
             }
+
+            index = end;
         }
     }
 
