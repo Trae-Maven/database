@@ -42,9 +42,9 @@ public class DatabaseApi {
     /**
      * Returns whether all registered repositories have completed loading.
      *
-     * <p>Delegates to {@link AbstractRepository#isLoaded()} on each registered
-     * repository. Returns {@code true} only when every repository reports loaded,
-     * or when no repositories have been registered.</p>
+     * <p>Delegates to {@link AbstractRepository}'s {@code isLoaded()} on each
+     * registered repository. Returns {@code true} only when every repository
+     * reports loaded, or when no repositories have been registered.</p>
      *
      * @return {@code true} if all repositories are loaded, {@code false} otherwise
      */
