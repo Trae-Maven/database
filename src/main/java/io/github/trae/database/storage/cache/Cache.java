@@ -6,15 +6,19 @@ import lombok.AllArgsConstructor;
 import lombok.Getter;
 
 import java.time.Duration;
+import java.util.function.Predicate;
 
 /**
- * TTL-aware wrapper for cached values in {@link io.github.trae.database.storage.LocalStorage}.
+ * TTL- and predicate-aware wrapper for cached values in
+ * {@link io.github.trae.database.storage.LocalStorage}.
  *
- * <p>Each instance captures the stored value, an optional TTL duration, and the
- * system time at construction. The {@link #isValid()} check determines whether
- * the entry has expired based on elapsed time since creation.</p>
+ * <p>Each instance captures the stored value, an optional TTL duration, an optional
+ * expiration predicate, and the system time at construction. The {@link #isValid()}
+ * check determines whether the entry is still valid based on both the predicate and
+ * the elapsed time since creation.</p>
  *
- * <p>A {@code null} TTL indicates a permanent entry that never expires.</p>
+ * <p>A {@code null} TTL indicates an entry that never expires by time; a {@code null}
+ * predicate imposes no additional expiration condition.</p>
  *
  * @param <Value> the type of the cached value
  * @see ICache
@@ -25,18 +29,24 @@ public class Cache<Value> implements ICache {
 
     private final Value value;
     private final Duration ttl;
+    private final Predicate<Value> predicate;
     private final long systemTime = System.currentTimeMillis();
 
     /**
      * Checks whether this cache entry is still valid.
      *
-     * <p>Returns {@code true} if the TTL is {@code null} (permanent entry) or
-     * the elapsed time since creation has not exceeded the TTL duration.</p>
+     * <p>An entry is invalid if an expiration predicate is present and tests {@code true}
+     * for the stored value. Otherwise it is valid when the TTL is {@code null} (no time
+     * expiry) or the elapsed time since creation has not exceeded the TTL duration.</p>
      *
      * @return {@code true} if the entry has not expired
      */
     @Override
     public boolean isValid() {
+        if (this.getPredicate() != null && this.getPredicate().test(this.getValue())) {
+            return false;
+        }
+
         if (this.getTtl() == null) {
             return true;
         }

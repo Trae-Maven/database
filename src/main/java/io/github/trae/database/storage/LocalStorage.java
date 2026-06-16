@@ -1,6 +1,7 @@
 package io.github.trae.database.storage;
 
 import io.github.trae.database.storage.cache.Cache;
+import io.github.trae.database.storage.interfaces.ILocalStorage;
 import io.github.trae.database.storage.interfaces.Storage;
 import io.github.trae.utilities.UtilTime;
 
@@ -11,19 +12,22 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
 
 /**
  * {@link ConcurrentHashMap}-backed in-memory implementation of {@link Storage}
- * with per-key TTL support.
+ * with per-key TTL and per-entry expiration-predicate support.
  *
  * <p>Each entry is wrapped in a {@link Cache} object that tracks its creation
- * time and TTL duration. Expiry is enforced in two ways:</p>
+ * time, optional TTL duration, and optional expiration predicate. An entry is
+ * considered valid only while it has not exceeded its TTL and its predicate
+ * (if any) does not test {@code true}. Expiry is enforced in two ways:</p>
  * <ul>
  *     <li><b>Lazy eviction</b> — on every {@link #get} call, if the requested
- *     entry has expired it is removed and {@link Optional#empty()} is returned.</li>
+ *     entry is no longer valid it is removed and {@link Optional#empty()} is returned.</li>
  *     <li><b>Batched background sweep</b> — triggered on {@link #get} calls at most
  *     once per minute <em>per instance</em>, removing up to
- *     {@value #EVICTION_BATCH_SIZE} expired entries per pass to prevent memory
+ *     {@value #EVICTION_BATCH_SIZE} invalid entries per pass to prevent memory
  *     buildup without causing lag spikes. Entry into a sweep is gated by a
  *     compare-and-set so only a single thread sweeps per interval; concurrent
  *     callers skip the sweep and proceed directly to their lookup.</li>
@@ -33,17 +37,17 @@ import java.util.concurrent.atomic.AtomicLong;
  * independent cadence rather than sharing a single clock across all storages.</p>
  *
  * <p>Read methods ({@link #getKeys}, {@link #getValues}, {@link #getSize}) filter
- * out expired entries from their results.</p>
+ * out invalid entries from their results.</p>
  *
  * @param <Key>   the key type
  * @param <Value> the value type
  * @see Storage
  * @see Cache
  */
-public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
+public class LocalStorage<Key, Value> implements ILocalStorage<Key, Value> {
 
     /**
-     * Maximum number of expired entries removed per eviction pass.
+     * Maximum number of invalid entries removed per eviction pass.
      */
     private static final int EVICTION_BATCH_SIZE = 10_000;
 
@@ -62,7 +66,26 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
     private final ConcurrentHashMap<Key, Cache<Value>> map = new ConcurrentHashMap<>();
 
     /**
-     * Stores a value with the given TTL. A {@code null} TTL creates a permanent entry.
+     * Stores a value with the given TTL and validity predicate. A {@code null} TTL creates a
+     * non-expiring entry; a {@code null} predicate imposes no extra expiration condition.
+     *
+     * @param key       the key to store under
+     * @param value     the value to store
+     * @param ttl       the time-to-live duration, or {@code null} for permanent
+     * @param predicate the expiration predicate; when it tests {@code true} the entry is treated as expired, or {@code null} for none
+     */
+    @Override
+    public void put(final Key key, final Value value, final Duration ttl, final Predicate<Value> predicate) {
+        if (key == null) {
+            throw new IllegalArgumentException("Key cannot be null.");
+        }
+
+        this.map.put(key, new Cache<>(value, ttl, predicate));
+    }
+
+    /**
+     * Stores a value with the given TTL and no validity predicate. A {@code null} TTL creates a
+     * permanent entry.
      *
      * @param key   the key to store under
      * @param value the value to store
@@ -70,16 +93,30 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
      */
     @Override
     public void put(final Key key, final Value value, final Duration ttl) {
-        if (key == null) {
-            throw new IllegalArgumentException("Key cannot be null.");
-        }
-
-        this.map.put(key, new Cache<>(value, ttl));
+        this.put(key, value, ttl, null);
     }
 
+    /**
+     * Stores a value with no TTL, expired when the given predicate tests {@code true}.
+     *
+     * @param key       the key to store under
+     * @param value     the value to store
+     * @param predicate the expiration predicate; when it tests {@code true} the entry is treated as expired, or {@code null} for none
+     */
+    @Override
+    public void put(final Key key, final Value value, final Predicate<Value> predicate) {
+        this.put(key, value, null, predicate);
+    }
+
+    /**
+     * Stores a permanent value with no validity predicate.
+     *
+     * @param key   the key to store under
+     * @param value the value to store
+     */
     @Override
     public void put(final Key key, final Value value) {
-        this.put(key, value, null);
+        this.put(key, value, null, null);
     }
 
     /**
@@ -97,8 +134,30 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
     }
 
     /**
-     * Replaces an entry under a new key. Removes the previous key first, then
-     * stores the value under the new key if both key and value are non-null.
+     * Replaces an entry under a new key. Removes the previous key first, then stores the value
+     * under the new key with the given TTL and predicate if both key and value are non-null.
+     *
+     * @param previousKey the old key to remove
+     * @param key         the new key to store under
+     * @param value       the value to store
+     * @param ttl         the time-to-live duration, or {@code null} for permanent
+     * @param predicate   the validity predicate tested on the value, or {@code null} for none
+     */
+    @Override
+    public void update(final Key previousKey, final Key key, final Value value, final Duration ttl, final Predicate<Value> predicate) {
+        if (previousKey == null) {
+            throw new IllegalArgumentException("Previous Key cannot be null.");
+        }
+
+        this.remove(previousKey);
+
+        if (key != null && value != null) {
+            this.put(key, value, ttl, predicate);
+        }
+    }
+
+    /**
+     * Replaces an entry under a new key with the given TTL and no validity predicate.
      *
      * @param previousKey the old key to remove
      * @param key         the new key to store under
@@ -107,32 +166,44 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
      */
     @Override
     public void update(final Key previousKey, final Key key, final Value value, final Duration ttl) {
-        if (previousKey == null) {
-            throw new IllegalArgumentException("Previous Key cannot be null.");
-        }
-
-        this.remove(previousKey);
-
-        if (key != null && value != null) {
-            this.put(key, value, ttl);
-        }
-    }
-
-    @Override
-    public void update(final Key previousKey, final Key key, final Value value) {
-        this.update(previousKey, key, value, null);
+        this.update(previousKey, key, value, ttl, null);
     }
 
     /**
-     * Retrieves the value for the given key if it exists and has not expired.
+     * Replaces an entry under a new key with no TTL, expired when the given predicate tests {@code true}.
+     *
+     * @param previousKey the old key to remove
+     * @param key         the new key to store under
+     * @param value       the value to store
+     * @param predicate   the validity predicate tested on the value, or {@code null} for none
+     */
+    @Override
+    public void update(final Key previousKey, final Key key, final Value value, final Predicate<Value> predicate) {
+        this.update(previousKey, key, value, null, predicate);
+    }
+
+    /**
+     * Replaces an entry under a new key as a permanent value with no validity predicate.
+     *
+     * @param previousKey the old key to remove
+     * @param key         the new key to store under
+     * @param value       the value to store
+     */
+    @Override
+    public void update(final Key previousKey, final Key key, final Value value) {
+        this.update(previousKey, key, value, null, null);
+    }
+
+    /**
+     * Retrieves the value for the given key if it exists and is still valid.
      *
      * <p>Before performing the lookup, attempts a batched eviction sweep if the
      * eviction interval has elapsed for this instance. Entry is gated by a
      * compare-and-set on the eviction timestamp, so only a single thread sweeps
      * per interval while concurrent callers proceed straight to their lookup. The
-     * winning thread removes up to {@value #EVICTION_BATCH_SIZE} expired entries.</p>
+     * winning thread removes up to {@value #EVICTION_BATCH_SIZE} invalid entries.</p>
      *
-     * <p>If the requested entry itself has expired, it is lazily removed and
+     * <p>If the requested entry itself is no longer valid, it is lazily removed and
      * {@link Optional#empty()} is returned.</p>
      *
      * @param key the key to look up
@@ -159,7 +230,7 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
     }
 
     /**
-     * Checks whether a valid (non-expired) entry exists for the given key.
+     * Checks whether a valid entry exists for the given key.
      *
      * @param key the key to check
      * @return {@code true} if the key maps to a valid entry
@@ -182,7 +253,7 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
     }
 
     /**
-     * Returns all keys that map to valid (non-expired) entries.
+     * Returns all keys that map to valid entries.
      *
      * @return an immutable list of valid keys
      */
@@ -192,7 +263,7 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
     }
 
     /**
-     * Returns all values from valid (non-expired) entries.
+     * Returns all values from valid entries.
      *
      * @return an immutable list of valid values
      */
@@ -202,7 +273,7 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
     }
 
     /**
-     * Returns the count of valid (non-expired) entries.
+     * Returns the count of valid entries.
      *
      * @return the number of valid entries
      */
@@ -222,11 +293,33 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
     }
 
     /**
+     * Hook for indexing a value on insertion. No-op in the base implementation; subclasses may
+     * override to maintain secondary indexes.
+     *
+     * @param value the value to index
+     */
+    @Override
+    public void index(final Value value) {
+
+    }
+
+    /**
+     * Hook for removing a value from any indexes on removal. No-op in the base implementation;
+     * subclasses may override to maintain secondary indexes.
+     *
+     * @param value the value to un-index
+     */
+    @Override
+    public void unIndex(final Value value) {
+
+    }
+
+    /**
      * Performs a batched eviction sweep if the interval has elapsed and this
      * thread wins the compare-and-set claiming the interval. Removes up to
-     * {@value #EVICTION_BATCH_SIZE} expired entries in a single pass. If the
+     * {@value #EVICTION_BATCH_SIZE} invalid entries in a single pass. If the
      * batch limit is reached, the timestamp is rewound so the next {@link #get}
-     * call can immediately continue sweeping the remaining expired entries.
+     * call can immediately continue sweeping the remaining invalid entries.
      */
     private void sweep() {
         final long last = this.lastEviction.get();
