@@ -1,6 +1,7 @@
 package io.github.trae.database.storage;
 
 import io.github.trae.database.constants.Constants;
+import io.github.trae.database.storage.interfaces.IRedisStorage;
 import io.github.trae.database.storage.interfaces.Storage;
 import io.github.trae.database.types.redis.RedisDatabaseDriver;
 import io.github.trae.utilities.UtilGeneric;
@@ -15,6 +16,8 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.function.Supplier;
 
 /**
  * Jedis-backed distributed implementation of {@link Storage} with native Redis TTL
@@ -35,7 +38,7 @@ import java.util.Optional;
  * @see RedisDatabaseDriver
  */
 @AllArgsConstructor
-public abstract class RedisStorage<Value> implements Storage<String, Value> {
+public abstract class RedisStorage<Value> implements IRedisStorage<Value> {
 
     private final RedisDatabaseDriver redisDatabaseDriver;
     private final String redisKey;
@@ -134,6 +137,74 @@ public abstract class RedisStorage<Value> implements Storage<String, Value> {
         }
 
         return this.redisDatabaseDriver.getResource(jedis -> Optional.ofNullable(jedis.get(this.key(key))).map(value -> Constants.GSON.fromJson(value, (Class<Value>) UtilGeneric.getGenericParameter(this.getClass(), RedisStorage.class, 1))));
+    }
+
+    /**
+     * Retrieves a value, or loads it via the supplied loader on a cache miss, using a
+     * distributed lock to prevent stampedes across instances.
+     *
+     * <p>On a miss, the first caller across all instances acquires a short-lived lock
+     * via {@code SET NX EX}, runs the loader, and populates the cache. Concurrent callers
+     * that fail to acquire the lock wait and re-read, served the freshly populated value
+     * rather than each invoking the loader. If the lock holder does not populate the key
+     * within {@code maxRetries} attempts, waiters fall through and invoke the loader
+     * directly as a safety valve.</p>
+     *
+     * @param key        the key to look up (will be prefixed with {@link #redisKey})
+     * @param ttl        the time-to-live applied to a loaded value, or {@code null} for no expiry
+     * @param loader     supplies the value on a miss; an empty result is not cached
+     * @param lockTtl    the lock's safety expiry, guarding against a crashed loader
+     * @param maxRetries how many times a lock-loser re-reads before falling through to the loader
+     * @param retryDelay how long to wait between re-reads
+     * @return the cached or freshly loaded value, or empty if the loader returns empty
+     */
+    public Optional<Value> getOrLoad(final String key, final Duration ttl, final Supplier<Optional<Value>> loader, final Duration lockTtl, final int maxRetries, final Duration retryDelay) {
+        final Optional<Value> cached = this.get(key);
+
+        if (cached.isPresent()) {
+            return cached;
+        }
+
+        final String lockKey = "lock:%s".formatted(this.key(key));
+        final String lockToken = UUID.randomUUID().toString();
+
+        final boolean acquired = this.redisDatabaseDriver.getResource(jedis -> "OK".equals(jedis.set(lockKey, lockToken, SetParams.setParams().nx().ex(lockTtl.toSeconds()))));
+
+        if (acquired) {
+            try {
+                final Optional<Value> recheck = this.get(key);
+
+                if (recheck.isPresent()) {
+                    return recheck;
+                }
+
+                final Optional<Value> loaded = loader.get();
+
+                loaded.ifPresent(value -> this.put(key, value, ttl));
+
+                return loaded;
+            } finally {
+                this.releaseLock(lockKey, lockToken);
+            }
+        }
+
+        for (int attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                Thread.sleep(retryDelay.toMillis());
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+
+                break;
+            }
+
+            final Optional<Value> retry = this.get(key);
+
+            if (retry.isPresent()) {
+                return retry;
+            }
+        }
+
+        return loader.get();
     }
 
     /**
@@ -290,5 +361,18 @@ public abstract class RedisStorage<Value> implements Storage<String, Value> {
      */
     private String key(final String key) {
         return "%s:%s".formatted(this.redisKey, key);
+    }
+
+    /**
+     * Releases a distributed lock only if the caller still owns it, comparing the
+     * stored token against the expected token via an atomic {@code GET}/{@code DEL}
+     * Lua script. This prevents deleting a lock that has expired and been re-acquired
+     * by another instance.
+     *
+     * @param lockKey   the full (already prefixed) lock key
+     * @param lockToken the token proving ownership of the lock
+     */
+    private void releaseLock(final String lockKey, final String lockToken) {
+        this.redisDatabaseDriver.useResource(jedis -> jedis.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", List.of(lockKey), List.of(lockToken)));
     }
 }
