@@ -44,7 +44,7 @@ import java.util.function.Predicate;
  * @see Storage
  * @see Cache
  */
-public class LocalStorage<Key, Value> implements ILocalStorage<Key, Value> {
+public abstract class LocalStorage<Key, Value> implements ILocalStorage<Key, Value> {
 
     /**
      * Maximum number of invalid entries removed per eviction pass.
@@ -290,28 +290,6 @@ public class LocalStorage<Key, Value> implements ILocalStorage<Key, Value> {
     @Override
     public boolean isEmpty() {
         return this.getSize() <= 0;
-    }
-
-    /**
-     * Hook for indexing a value on insertion. No-op in the base implementation; subclasses may
-     * override to maintain secondary indexes.
-     *
-     * @param value the value to index
-     */
-    @Override
-    public void index(final Value value) {
-
-    }
-
-    /**
-     * Hook for removing a value from any indexes on removal. No-op in the base implementation;
-     * subclasses may override to maintain secondary indexes.
-     *
-     * @param value the value to un-index
-     */
-    @Override
-    public void unIndex(final Value value) {
-
     }
 
     /**
