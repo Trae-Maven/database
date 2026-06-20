@@ -136,7 +136,7 @@ public abstract class RedisStorage<Value> implements IRedisStorage<Value> {
             return Optional.empty();
         }
 
-        return this.redisDatabaseDriver.getResource(jedis -> Optional.ofNullable(jedis.get(this.key(key))).map(value -> Constants.GSON.fromJson(value, (Class<Value>) UtilGeneric.getGenericParameter(this.getClass(), RedisStorage.class, 1))));
+        return this.redisDatabaseDriver.getResource(jedis -> Optional.ofNullable(jedis.get(this.key(key))).map(value -> Constants.GSON.fromJson(value, (Class<Value>) UtilGeneric.getGenericParameter(this.getClass(), RedisStorage.class, 0))));
     }
 
     /**
@@ -304,7 +304,7 @@ public abstract class RedisStorage<Value> implements IRedisStorage<Value> {
                     if (!(keys.isEmpty())) {
                         for (final String json : jedis.mget(keys.toArray(String[]::new))) {
                             if (json != null) {
-                                list.add(Constants.GSON.fromJson(json, (Class<Value>) UtilGeneric.getGenericParameter(this.getClass(), RedisStorage.class, 1)));
+                                list.add(Constants.GSON.fromJson(json, (Class<Value>) UtilGeneric.getGenericParameter(this.getClass(), RedisStorage.class, 0)));
                             }
                         }
                     }
