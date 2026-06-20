@@ -4,7 +4,6 @@ import io.github.trae.database.constants.Constants;
 import io.github.trae.database.storage.interfaces.IRedisStorage;
 import io.github.trae.database.storage.interfaces.Storage;
 import io.github.trae.database.types.redis.RedisDatabaseDriver;
-import io.github.trae.utilities.UtilGeneric;
 import io.github.trae.utilities.UtilJava;
 import io.github.trae.utilities.UtilString;
 import lombok.AllArgsConstructor;
@@ -25,8 +24,8 @@ import java.util.function.Supplier;
  *
  * <p>Keys are automatically prefixed with a configurable namespace using the format
  * {@code {redisKey}:{key}} to avoid collisions across different storage instances.
- * Values are serialized to JSON via {@link Constants#GSON} and the {@code Value} type
- * is resolved at runtime via {@link UtilGeneric#getGenericParameter}.</p>
+ * Values are serialized to JSON via {@link Constants#GSON} and deserialized using the
+ * {@code Class<Value>} supplied at construction.</p>
  *
  * <p>All scan-based operations ({@link #flush}, {@link #getKeys}, {@link #getValues},
  * {@link #getSize}) use {@code SCAN} with a batch count of 100 instead of {@code KEYS}
@@ -41,6 +40,7 @@ import java.util.function.Supplier;
 public abstract class RedisStorage<Value> implements IRedisStorage<Value> {
 
     private final RedisDatabaseDriver redisDatabaseDriver;
+    private final Class<Value> valueClass;
     private final String redisKey;
 
     /**
@@ -123,20 +123,18 @@ public abstract class RedisStorage<Value> implements IRedisStorage<Value> {
     /**
      * Retrieves and deserializes a value from Redis.
      *
-     * <p>The {@code Value} class is resolved at runtime via
-     * {@link UtilGeneric#getGenericParameter} for Gson deserialization.</p>
+     * <p>Deserialized into {@code Value} using the class supplied at construction.</p>
      *
      * @param key the key to look up (will be prefixed with {@link #redisKey})
      * @return the deserialized value if present, otherwise empty
      */
-    @SuppressWarnings("unchecked")
     @Override
     public Optional<Value> get(final String key) {
         if (UtilString.isEmpty(key)) {
             return Optional.empty();
         }
 
-        return this.redisDatabaseDriver.getResource(jedis -> Optional.ofNullable(jedis.get(this.key(key))).map(value -> Constants.GSON.fromJson(value, (Class<Value>) UtilGeneric.getGenericParameter(this.getClass(), RedisStorage.class, 0))));
+        return this.redisDatabaseDriver.getResource(jedis -> Optional.ofNullable(jedis.get(this.key(key))).map(value -> Constants.GSON.fromJson(value, this.valueClass)));
     }
 
     /**
@@ -288,7 +286,6 @@ public abstract class RedisStorage<Value> implements IRedisStorage<Value> {
      *
      * @return a list of deserialized values
      */
-    @SuppressWarnings("unchecked")
     @Override
     public List<Value> getValues() {
         return this.redisDatabaseDriver.getResource(jedis -> {
@@ -304,7 +301,7 @@ public abstract class RedisStorage<Value> implements IRedisStorage<Value> {
                     if (!(keys.isEmpty())) {
                         for (final String json : jedis.mget(keys.toArray(String[]::new))) {
                             if (json != null) {
-                                list.add(Constants.GSON.fromJson(json, (Class<Value>) UtilGeneric.getGenericParameter(this.getClass(), RedisStorage.class, 0)));
+                                list.add(Constants.GSON.fromJson(json, this.valueClass));
                             }
                         }
                     }
