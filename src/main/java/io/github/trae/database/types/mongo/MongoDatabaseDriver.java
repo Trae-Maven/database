@@ -48,6 +48,14 @@ import java.util.concurrent.CompletableFuture;
  * <p>Read operations execute synchronously against the MongoDB driver. Asynchronous
  * read variants delegate to the synchronous methods via {@link CompletableFuture#supplyAsync}.</p>
  *
+ * <p>Every returned document is passed through {@link #documentToMap}, which recursively
+ * converts nested {@link Document} instances and {@link List} elements into
+ * {@link LinkedHashMap} and {@link List} via {@link #normalizeValue}. The same
+ * normalization is applied to projected property reads, so a nested property is
+ * returned as a {@link LinkedHashMap} rather than a raw BSON {@link Document} —
+ * the shape {@link io.github.trae.database.domain.data.DomainData} expects during
+ * deserialization.</p>
+ *
  * <p>The {@code _id} field is used directly as the UUID primary key.</p>
  *
  * @see DatabaseDriver
@@ -101,14 +109,14 @@ public class MongoDatabaseDriver implements DatabaseDriver {
      * set to {@code true}. If a filter list is provided, it is used as the match
      * condition; otherwise falls back to matching on {@code _id}.</p>
      *
-     * @param database   the target database name
-     * @param collection the target collection name
-     * @param identifier the domain's UUID ({@code _id})
-     * @param filterList the filter conditions for matching, or empty/null to match on {@code _id}
-     * @param dataMap    the property name to value map
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param identifier     the domain's UUID ({@code _id})
+     * @param filterList     the filter conditions for matching, or empty/null to match on {@code _id}
+     * @param dataMap        the property name to value map
      */
     @Override
-    public void save(final String database, final String collection, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap) {
+    public void save(final String databaseName, final String collectionName, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap) {
         final List<Bson> updates = UtilJava.createCollection(new ArrayList<>(), list -> {
             for (final Map.Entry<String, Object> entry : dataMap.entrySet()) {
                 list.add(Updates.set(entry.getKey(), this.convertValue(entry.getValue())));
@@ -116,8 +124,8 @@ public class MongoDatabaseDriver implements DatabaseDriver {
         });
 
         this.batchQueue.add(new MongoWriteOperation(
-                database,
-                collection,
+                databaseName,
+                collectionName,
                 new UpdateOneModel<>(
                         this.buildWriteFilter(identifier, filterList),
                         Updates.combine(updates),
@@ -133,14 +141,14 @@ public class MongoDatabaseDriver implements DatabaseDriver {
      * provided, it is used as the match condition; otherwise falls back to
      * matching on {@code _id}.</p>
      *
-     * @param database   the target database name
-     * @param collection the target collection name
-     * @param identifier the domain's UUID ({@code _id})
-     * @param filterList the filter conditions for matching, or empty/null to match on {@code _id}
-     * @param dataMap    the property name to value map of fields to update
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param identifier     the domain's UUID ({@code _id})
+     * @param filterList     the filter conditions for matching, or empty/null to match on {@code _id}
+     * @param dataMap        the property name to value map of fields to update
      */
     @Override
-    public void update(final String database, final String collection, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap) {
+    public void update(final String databaseName, final String collectionName, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap) {
         final List<Bson> updates = UtilJava.createCollection(new ArrayList<>(), list -> {
             for (final Map.Entry<String, Object> entry : dataMap.entrySet()) {
                 list.add(Updates.set(entry.getKey(), this.convertValue(entry.getValue())));
@@ -148,8 +156,8 @@ public class MongoDatabaseDriver implements DatabaseDriver {
         });
 
         this.batchQueue.add(new MongoWriteOperation(
-                database,
-                collection,
+                databaseName,
+                collectionName,
                 new UpdateOneModel<>(
                         this.buildWriteFilter(identifier, filterList),
                         Updates.combine(updates)
@@ -163,16 +171,16 @@ public class MongoDatabaseDriver implements DatabaseDriver {
      * <p>If a filter list is provided, it is used as the match condition;
      * otherwise falls back to matching on {@code _id}.</p>
      *
-     * @param database   the target database name
-     * @param collection the target collection name
-     * @param identifier the domain's UUID ({@code _id})
-     * @param filterList the filter conditions for matching, or empty/null to match on {@code _id}
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param identifier     the domain's UUID ({@code _id})
+     * @param filterList     the filter conditions for matching, or empty/null to match on {@code _id}
      */
     @Override
-    public void delete(final String database, final String collection, final UUID identifier, final List<Filter> filterList) {
+    public void delete(final String databaseName, final String collectionName, final UUID identifier, final List<Filter> filterList) {
         this.batchQueue.add(new MongoWriteOperation(
-                database,
-                collection,
+                databaseName,
+                collectionName,
                 new DeleteOneModel<>(this.buildWriteFilter(identifier, filterList))
         ));
     }
@@ -180,14 +188,14 @@ public class MongoDatabaseDriver implements DatabaseDriver {
     /**
      * Synchronously finds a single document by its {@code _id}.
      *
-     * @param database   the target database name
-     * @param collection the target collection name
-     * @param identifier the UUID to look up
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param identifier     the UUID to look up
      * @return an {@link Optional} containing the raw data map, or empty if not found
      */
     @Override
-    public Optional<LinkedHashMap<String, Object>> findOneSynchronously(final String database, final String collection, final UUID identifier) {
-        final Document document = this.getCollection(database, collection).find(Filters.eq("_id", identifier)).first();
+    public Optional<LinkedHashMap<String, Object>> findOneSynchronously(final String databaseName, final String collectionName, final UUID identifier) {
+        final Document document = this.getCollection(databaseName, collectionName).find(Filters.eq("_id", identifier)).first();
 
         return Optional.ofNullable(document).map(this::documentToMap);
     }
@@ -195,14 +203,14 @@ public class MongoDatabaseDriver implements DatabaseDriver {
     /**
      * Synchronously finds a single document matching the given filters.
      *
-     * @param database   the target database name
-     * @param collection the target collection name
-     * @param filters    the filter conditions to apply
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param filters        the filter conditions to apply
      * @return an {@link Optional} containing the raw data map, or empty if not found
      */
     @Override
-    public Optional<LinkedHashMap<String, Object>> findOneSynchronously(final String database, final String collection, final List<Filter> filters) {
-        final Document document = this.getCollection(database, collection).find(this.buildFilters(filters)).first();
+    public Optional<LinkedHashMap<String, Object>> findOneSynchronously(final String databaseName, final String collectionName, final List<Filter> filters) {
+        final Document document = this.getCollection(databaseName, collectionName).find(this.buildFilters(filters)).first();
 
         return Optional.ofNullable(document).map(this::documentToMap);
     }
@@ -213,14 +221,14 @@ public class MongoDatabaseDriver implements DatabaseDriver {
      * <p>Applies sort and skip from the {@link QueryOptions} to the query iterable
      * before retrieving the first result.</p>
      *
-     * @param database   the target database name
-     * @param collection the target collection name
-     * @param options    the query options including filters, sort, and skip
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param options        the query options including filters, sort, and skip
      * @return an {@link Optional} containing the raw data map, or empty if not found
      */
     @Override
-    public Optional<LinkedHashMap<String, Object>> findOneSynchronously(final String database, final String collection, final QueryOptions options) {
-        FindIterable<Document> iterable = this.getCollection(database, collection).find(this.buildFilters(options.getFilters()));
+    public Optional<LinkedHashMap<String, Object>> findOneSynchronously(final String databaseName, final String collectionName, final QueryOptions options) {
+        FindIterable<Document> iterable = this.getCollection(databaseName, collectionName).find(this.buildFilters(options.getFilters()));
 
         if (options.getField() != null) {
             iterable = iterable.sort(this.buildSort(options.getField(), options.getSortDirection()));
@@ -236,16 +244,16 @@ public class MongoDatabaseDriver implements DatabaseDriver {
     /**
      * Synchronously finds all documents matching the given filters.
      *
-     * @param database   the target database name
-     * @param collection the target collection name
-     * @param filters    the filter conditions to apply
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param filters        the filter conditions to apply
      * @return a list of raw data maps, empty if no matches
      */
     @Override
-    public List<LinkedHashMap<String, Object>> findManySynchronously(final String database, final String collection, final List<Filter> filters) {
+    public List<LinkedHashMap<String, Object>> findManySynchronously(final String databaseName, final String collectionName, final List<Filter> filters) {
         final List<LinkedHashMap<String, Object>> results = new ArrayList<>();
 
-        this.getCollection(database, collection)
+        this.getCollection(databaseName, collectionName)
                 .find(this.buildFilters(filters))
                 .forEach(document -> results.add(this.documentToMap(document)));
 
@@ -258,16 +266,16 @@ public class MongoDatabaseDriver implements DatabaseDriver {
      * <p>Applies sort, skip, and limit from the {@link QueryOptions}
      * to the query iterable before iterating results.</p>
      *
-     * @param database   the target database name
-     * @param collection the target collection name
-     * @param options    the query options including filters, sort, limit, and skip
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param options        the query options including filters, sort, limit, and skip
      * @return a list of raw data maps, empty if no matches
      */
     @Override
-    public List<LinkedHashMap<String, Object>> findManySynchronously(final String database, final String collection, final QueryOptions options) {
+    public List<LinkedHashMap<String, Object>> findManySynchronously(final String databaseName, final String collectionName, final QueryOptions options) {
         final List<LinkedHashMap<String, Object>> results = new ArrayList<>();
 
-        FindIterable<Document> iterable = this.getCollection(database, collection).find(this.buildFilters(options.getFilters()));
+        FindIterable<Document> iterable = this.getCollection(databaseName, collectionName).find(this.buildFilters(options.getFilters()));
 
         if (options.getField() != null) {
             iterable = iterable.sort(this.buildSort(options.getField(), options.getSortDirection()));
@@ -288,66 +296,253 @@ public class MongoDatabaseDriver implements DatabaseDriver {
     /**
      * Asynchronously finds a single document by its {@code _id}.
      *
-     * @param database   the target database name
-     * @param collection the target collection name
-     * @param identifier the UUID to look up
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param identifier     the UUID to look up
      * @return a future resolving to an {@link Optional} containing the raw data map
      */
     @Override
-    public CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneAsynchronously(final String database, final String collection, final UUID identifier) {
-        return CompletableFuture.supplyAsync(() -> this.findOneSynchronously(database, collection, identifier));
+    public CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneAsynchronously(final String databaseName, final String collectionName, final UUID identifier) {
+        return CompletableFuture.supplyAsync(() -> this.findOneSynchronously(databaseName, collectionName, identifier));
     }
 
     /**
      * Asynchronously finds a single document matching the given filters.
      *
-     * @param database   the target database name
-     * @param collection the target collection name
-     * @param filters    the filter conditions to apply
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param filters        the filter conditions to apply
      * @return a future resolving to an {@link Optional} containing the raw data map
      */
     @Override
-    public CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneAsynchronously(final String database, final String collection, final List<Filter> filters) {
-        return CompletableFuture.supplyAsync(() -> this.findOneSynchronously(database, collection, filters));
+    public CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneAsynchronously(final String databaseName, final String collectionName, final List<Filter> filters) {
+        return CompletableFuture.supplyAsync(() -> this.findOneSynchronously(databaseName, collectionName, filters));
     }
 
     /**
      * Asynchronously finds a single document matching the given query options.
      *
-     * @param database   the target database name
-     * @param collection the target collection name
-     * @param options    the query options including filters, sort, and skip
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param options        the query options including filters, sort, and skip
      * @return a future resolving to an {@link Optional} containing the raw data map
      */
     @Override
-    public CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneAsynchronously(final String database, final String collection, final QueryOptions options) {
-        return CompletableFuture.supplyAsync(() -> this.findOneSynchronously(database, collection, options));
+    public CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneAsynchronously(final String databaseName, final String collectionName, final QueryOptions options) {
+        return CompletableFuture.supplyAsync(() -> this.findOneSynchronously(databaseName, collectionName, options));
     }
 
     /**
      * Asynchronously finds all documents matching the given filters.
      *
-     * @param database   the target database name
-     * @param collection the target collection name
-     * @param filters    the filter conditions to apply
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param filters        the filter conditions to apply
      * @return a future resolving to a list of raw data maps
      */
     @Override
-    public CompletableFuture<List<LinkedHashMap<String, Object>>> findManyAsynchronously(final String database, final String collection, final List<Filter> filters) {
-        return CompletableFuture.supplyAsync(() -> this.findManySynchronously(database, collection, filters));
+    public CompletableFuture<List<LinkedHashMap<String, Object>>> findManyAsynchronously(final String databaseName, final String collectionName, final List<Filter> filters) {
+        return CompletableFuture.supplyAsync(() -> this.findManySynchronously(databaseName, collectionName, filters));
     }
 
     /**
      * Asynchronously finds all documents matching the given query options.
      *
-     * @param database   the target database name
-     * @param collection the target collection name
-     * @param options    the query options including filters, sort, limit, and skip
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param options        the query options including filters, sort, limit, and skip
      * @return a future resolving to a list of raw data maps
      */
     @Override
-    public CompletableFuture<List<LinkedHashMap<String, Object>>> findManyAsynchronously(final String database, final String collection, final QueryOptions options) {
-        return CompletableFuture.supplyAsync(() -> this.findManySynchronously(database, collection, options));
+    public CompletableFuture<List<LinkedHashMap<String, Object>>> findManyAsynchronously(final String databaseName, final String collectionName, final QueryOptions options) {
+        return CompletableFuture.supplyAsync(() -> this.findManySynchronously(databaseName, collectionName, options));
+    }
+
+    /**
+     * Synchronously reads a single projected property from one document by its {@code _id}.
+     *
+     * <p>Projects only the named field, then normalizes the value via
+     * {@link #normalizeValue} so a nested sub-document is returned as a
+     * {@link LinkedHashMap} rather than a raw {@link Document}.</p>
+     *
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param identifier     the UUID to look up
+     * @param propertyKey    the property to project and return
+     * @return an {@link Optional} containing the property value, or empty if the document or property is absent
+     */
+    @Override
+    public Optional<Object> findOneByPropertySynchronously(final String databaseName, final String collectionName, final UUID identifier, final String propertyKey) {
+        final Document document = this.getCollection(databaseName, collectionName)
+                .find(Filters.eq("_id", identifier))
+                .projection(new Document(propertyKey, 1))
+                .first();
+
+        if (document == null || !(document.containsKey(propertyKey))) {
+            return Optional.empty();
+        }
+
+        return Optional.ofNullable(this.normalizeValue(document.get(propertyKey)));
+    }
+
+    /**
+     * Asynchronously reads a single projected property from one document by its {@code _id}.
+     *
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param identifier     the UUID to look up
+     * @param propertyKey    the property to project and return
+     * @return a future resolving to an {@link Optional} containing the property value
+     */
+    @Override
+    public CompletableFuture<Optional<Object>> findOneByPropertyAsynchronously(final String databaseName, final String collectionName, final UUID identifier, final String propertyKey) {
+        return CompletableFuture.supplyAsync(() -> this.findOneByPropertySynchronously(databaseName, collectionName, identifier, propertyKey));
+    }
+
+    /**
+     * Synchronously reads several projected properties from one document by its {@code _id}.
+     *
+     * <p>Projects only the named fields. The returned map preserves the requested key
+     * order; a property absent from the document maps to {@code null}. Each value is
+     * normalized via {@link #normalizeValue}.</p>
+     *
+     * @param databaseName    the target database name
+     * @param collectionName  the target collection name
+     * @param identifier      the UUID to look up
+     * @param propertyKeyList the properties to project and return
+     * @return an {@link Optional} containing a property-to-value map, or empty if the document is absent
+     */
+    @Override
+    public Optional<LinkedHashMap<String, Object>> findOneByManyPropertySynchronously(final String databaseName, final String collectionName, final UUID identifier, final List<String> propertyKeyList) {
+        final Document projection = new Document();
+
+        for (final String propertyKey : propertyKeyList) {
+            projection.append(propertyKey, 1);
+        }
+
+        final Document document = this.getCollection(databaseName, collectionName)
+                .find(Filters.eq("_id", identifier))
+                .projection(projection)
+                .first();
+
+        if (document == null) {
+            return Optional.empty();
+        }
+
+        final LinkedHashMap<String, Object> map = new LinkedHashMap<>();
+
+        for (final String propertyKey : propertyKeyList) {
+            map.put(propertyKey, this.normalizeValue(document.get(propertyKey)));
+        }
+
+        return Optional.of(map);
+    }
+
+    /**
+     * Asynchronously reads several projected properties from one document by its {@code _id}.
+     *
+     * @param databaseName    the target database name
+     * @param collectionName  the target collection name
+     * @param identifier      the UUID to look up
+     * @param propertyKeyList the properties to project and return
+     * @return a future resolving to an {@link Optional} containing a property-to-value map
+     */
+    @Override
+    public CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneByManyPropertyAsynchronously(final String databaseName, final String collectionName, final UUID identifier, final List<String> propertyKeyList) {
+        return CompletableFuture.supplyAsync(() -> this.findOneByManyPropertySynchronously(databaseName, collectionName, identifier, propertyKeyList));
+    }
+
+    /**
+     * Synchronously reads a single projected property from many documents in one query.
+     *
+     * <p>Matches all identifiers via {@code _id $in [...]} and projects the single named
+     * field, returning a map from each found {@code _id} to its normalized property value.
+     * Identifiers with no matching document are absent from the result.</p>
+     *
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param identifierList the identifiers to resolve
+     * @param propertyKey    the property to project and return for each
+     * @return a map from identifier to its property value, empty if none match
+     */
+    @Override
+    public LinkedHashMap<UUID, Object> findManyByOnePropertySynchronously(final String databaseName, final String collectionName, final List<UUID> identifierList, final String propertyKey) {
+        final LinkedHashMap<UUID, Object> results = new LinkedHashMap<>();
+
+        this.getCollection(databaseName, collectionName)
+                .find(Filters.in("_id", identifierList))
+                .projection(new Document(propertyKey, 1))
+                .forEach(document -> results.put(document.get("_id", UUID.class), this.normalizeValue(document.get(propertyKey))));
+
+        return results;
+    }
+
+    /**
+     * Asynchronously reads a single projected property from many documents in one query.
+     *
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param identifierList the identifiers to resolve
+     * @param propertyKey    the property to project and return for each
+     * @return a future resolving to a map from identifier to its property value
+     */
+    @Override
+    public CompletableFuture<LinkedHashMap<UUID, Object>> findManyByOnePropertyAsynchronously(final String databaseName, final String collectionName, final List<UUID> identifierList, final String propertyKey) {
+        return CompletableFuture.supplyAsync(() -> this.findManyByOnePropertySynchronously(databaseName, collectionName, identifierList, propertyKey));
+    }
+
+    /**
+     * Synchronously reads several projected properties from many documents in one query.
+     *
+     * <p>Matches all identifiers via {@code _id $in [...]} and projects the named fields,
+     * returning a map from each found {@code _id} to a property-to-value map. Each inner
+     * map preserves the requested key order; a property absent from a document maps to
+     * {@code null}. Values are normalized via {@link #normalizeValue}.</p>
+     *
+     * @param databaseName    the target database name
+     * @param collectionName  the target collection name
+     * @param identifierList  the identifiers to resolve
+     * @param propertyKeyList the properties to project and return for each
+     * @return a map from identifier to its property-to-value map, empty if none match
+     */
+    @Override
+    public LinkedHashMap<UUID, LinkedHashMap<String, Object>> findManyByManyPropertySynchronously(final String databaseName, final String collectionName, final List<UUID> identifierList, final List<String> propertyKeyList) {
+        final Document projection = new Document();
+
+        for (final String propertyKey : propertyKeyList) {
+            projection.append(propertyKey, 1);
+        }
+
+        final LinkedHashMap<UUID, LinkedHashMap<String, Object>> results = new LinkedHashMap<>();
+
+        this.getCollection(databaseName, collectionName)
+                .find(Filters.in("_id", identifierList))
+                .projection(projection)
+                .forEach(document -> {
+                    final LinkedHashMap<String, Object> map = new LinkedHashMap<>();
+
+                    for (final String propertyKey : propertyKeyList) {
+                        map.put(propertyKey, this.normalizeValue(document.get(propertyKey)));
+                    }
+
+                    results.put(document.get("_id", UUID.class), map);
+                });
+
+        return results;
+    }
+
+    /**
+     * Asynchronously reads several projected properties from many documents in one query.
+     *
+     * @param databaseName    the target database name
+     * @param collectionName  the target collection name
+     * @param identifierList  the identifiers to resolve
+     * @param propertyKeyList the properties to project and return for each
+     * @return a future resolving to a map from identifier to its property-to-value map
+     */
+    @Override
+    public CompletableFuture<LinkedHashMap<UUID, LinkedHashMap<String, Object>>> findManyByManyPropertyAsynchronously(final String databaseName, final String collectionName, final List<UUID> identifierList, final List<String> propertyKeyList) {
+        return CompletableFuture.supplyAsync(() -> this.findManyByManyPropertySynchronously(databaseName, collectionName, identifierList, propertyKeyList));
     }
 
     /**
@@ -355,14 +550,14 @@ public class MongoDatabaseDriver implements DatabaseDriver {
      *
      * <p>Projects only {@code _id} and limits to 1 result for maximum efficiency.</p>
      *
-     * @param database   the target database name
-     * @param collection the target collection name
-     * @param identifier the UUID to check
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param identifier     the UUID to check
      * @return {@code true} if the document exists
      */
     @Override
-    public boolean exists(final String database, final String collection, final UUID identifier) {
-        return this.getCollection(database, collection)
+    public boolean exists(final String databaseName, final String collectionName, final UUID identifier) {
+        return this.getCollection(databaseName, collectionName)
                 .find(Filters.eq("_id", identifier))
                 .projection(new Document("_id", 1))
                 .limit(1)
@@ -372,26 +567,26 @@ public class MongoDatabaseDriver implements DatabaseDriver {
     /**
      * Returns the total number of documents in the collection.
      *
-     * @param database   the target database name
-     * @param collection the target collection name
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
      * @return the document count
      */
     @Override
-    public long count(final String database, final String collection) {
-        return this.getCollection(database, collection).countDocuments();
+    public long count(final String databaseName, final String collectionName) {
+        return this.getCollection(databaseName, collectionName).countDocuments();
     }
 
     /**
      * Returns the number of documents matching the given filters.
      *
-     * @param database   the target database name
-     * @param collection the target collection name
-     * @param filters    the filter conditions to apply
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param filters        the filter conditions to apply
      * @return the matching document count
      */
     @Override
-    public long count(final String database, final String collection, final List<Filter> filters) {
-        return this.getCollection(database, collection).countDocuments(this.buildFilters(filters));
+    public long count(final String databaseName, final String collectionName, final List<Filter> filters) {
+        return this.getCollection(databaseName, collectionName).countDocuments(this.buildFilters(filters));
     }
 
     /**
@@ -400,12 +595,12 @@ public class MongoDatabaseDriver implements DatabaseDriver {
      * <p>Translates each {@link IndexEntry} into an ascending or descending
      * index key, then combines them via {@link Indexes#compoundIndex(java.util.List)}.</p>
      *
-     * @param databaseName the target database name
-     * @param collection   the target collection name
-     * @param index        the index definition
+     * @param databaseName   the target database name
+     * @param collectionName the target collection name
+     * @param index          the index definition
      */
     @Override
-    public void createIndex(final String databaseName, final String collection, final Index index) {
+    public void createIndex(final String databaseName, final String collectionName, final Index index) {
         final List<Bson> indexFields = UtilJava.createCollection(new ArrayList<>(), list -> {
             for (final IndexEntry entry : index.getEntries()) {
                 switch (entry.getDirection()) {
@@ -415,7 +610,7 @@ public class MongoDatabaseDriver implements DatabaseDriver {
             }
         });
 
-        this.getCollection(databaseName, collection).createIndex(Indexes.compoundIndex(indexFields), new IndexOptions().unique(index.isUnique()));
+        this.getCollection(databaseName, collectionName).createIndex(Indexes.compoundIndex(indexFields), new IndexOptions().unique(index.isUnique()));
     }
 
     /**
@@ -445,44 +640,12 @@ public class MongoDatabaseDriver implements DatabaseDriver {
     /**
      * Resolves a {@link MongoCollection} handle for the given database and collection name.
      *
-     * @param database   the database name
-     * @param collection the collection name
+     * @param databaseName   the database name
+     * @param collectionName the collection name
      * @return the MongoDB collection handle
      */
-    private MongoCollection<Document> getCollection(final String database, final String collection) {
-        return this.mongoClient.getDatabase(database).getCollection(collection);
-    }
-
-    /**
-     * Recursively converts a MongoDB {@link Document} to a {@link LinkedHashMap},
-     * including any nested {@link Document} instances and {@link List} elements
-     * containing {@link Document} entries at every depth.
-     *
-     * <p>This ensures that both sub-domain data stored as nested BSON documents
-     * and array fields containing BSON documents (such as territory lists) are
-     * returned as {@link LinkedHashMap} instances, which is required by
-     * {@link io.github.trae.database.domain.data.DomainData} for type matching
-     * during deserialization.</p>
-     *
-     * @param document the source document
-     * @return a mutable map containing the document's key-value pairs
-     */
-    private LinkedHashMap<String, Object> documentToMap(final Document document) {
-        return UtilJava.createMap(new LinkedHashMap<>(), map -> {
-            for (final Map.Entry<String, Object> entry : document.entrySet()) {
-                Object value = entry.getValue();
-
-                if (value instanceof final Document nested) {
-                    value = this.documentToMap(nested);
-                } else if (value instanceof final List<?> list) {
-                    value = list.stream().map(item ->
-                            item instanceof final Document doc ? this.documentToMap(doc) : item
-                    ).toList();
-                }
-
-                map.put(entry.getKey(), value);
-            }
-        });
+    private MongoCollection<Document> getCollection(final String databaseName, final String collectionName) {
+        return this.mongoClient.getDatabase(databaseName).getCollection(collectionName);
     }
 
     /**
@@ -583,6 +746,49 @@ public class MongoDatabaseDriver implements DatabaseDriver {
                 converted.put(entry.getKey().toString(), this.convertValue(entry.getValue()));
             }
             return converted;
+        }
+
+        return value;
+    }
+
+    /**
+     * Converts a MongoDB {@link Document} to a {@link LinkedHashMap}, recursively
+     * normalizing every value via {@link #normalizeValue}.
+     *
+     * <p>This ensures that sub-domain data stored as nested BSON documents and array
+     * fields containing BSON documents are returned as {@link LinkedHashMap} instances
+     * at every depth, which is required by
+     * {@link io.github.trae.database.domain.data.DomainData} for type matching during
+     * deserialization.</p>
+     *
+     * @param document the source document
+     * @return a mutable map containing the document's normalized key-value pairs
+     */
+    private LinkedHashMap<String, Object> documentToMap(final Document document) {
+        return UtilJava.createMap(new LinkedHashMap<>(), map -> {
+            for (final Map.Entry<String, Object> entry : document.entrySet()) {
+                map.put(entry.getKey(), this.normalizeValue(entry.getValue()));
+            }
+        });
+    }
+
+    /**
+     * Recursively normalizes a single value so all nested BSON documents become
+     * {@link LinkedHashMap} instances and all list elements are normalized in turn.
+     *
+     * <p>A {@link Document} is converted via {@link #documentToMap}; a {@link List}
+     * has each element normalized; any other value is returned unchanged.</p>
+     *
+     * @param value the value to normalize
+     * @return the normalized value
+     */
+    private Object normalizeValue(final Object value) {
+        if (value instanceof final Document nested) {
+            return this.documentToMap(nested);
+        }
+
+        if (value instanceof final List<?> list) {
+            return list.stream().map(this::normalizeValue).toList();
         }
 
         return value;

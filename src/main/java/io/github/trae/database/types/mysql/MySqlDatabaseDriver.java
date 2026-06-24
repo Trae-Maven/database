@@ -53,8 +53,12 @@ import java.util.logging.Logger;
  *
  * <p>The {@code _id} column is a {@code VARCHAR(36)} primary key storing the
  * UUID as a string. Column types are inferred from the Java type of the first
- * value written for each field. {@link Map} values are stored as {@code JSON}
- * columns and automatically serialized/deserialized via {@link Gson}.</p>
+ * value written for each field. {@link Map} and {@link List} values are stored as
+ * {@code JSON} columns; on read they are deserialized via {@link Gson} and then
+ * recursively normalized by {@link #normalizeValue} so every nested object is a
+ * {@link LinkedHashMap} — the shape
+ * {@link io.github.trae.database.domain.data.DomainData} expects during
+ * deserialization. The same JSON handling applies to projected property reads.</p>
  *
  * @see DatabaseDriver
  * @see BatchQueue
@@ -131,15 +135,15 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
      * required compound-unique index must be created separately via
      * {@link #createIndex}.</p>
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param identifier the domain's UUID ({@code _id})
-     * @param filterList the compound-key fields to seed on insert ({@code EQUALS} filters only), or empty/null for an {@code _id}-only upsert
-     * @param dataMap    the property name to value map
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param identifier     the domain's UUID ({@code _id})
+     * @param filterList     the compound-key fields to seed on insert ({@code EQUALS} filters only), or empty/null for an {@code _id}-only upsert
+     * @param dataMap        the property name to value map
      */
     @Override
-    public void save(final String database, final String collection, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap) {
-        this.ensureTable(database, collection, dataMap);
+    public void save(final String databaseName, final String collectionName, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap) {
+        this.ensureTable(databaseName, collectionName, dataMap);
 
         final List<String> columns = new ArrayList<>();
         final List<Object> values = new ArrayList<>();
@@ -164,9 +168,9 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
         final String columnList = String.join(", ", columns.stream().map("`%s`"::formatted).toList());
         final String placeholders = String.join(", ", columns.stream().map(c -> "?").toList());
         final String onDuplicate = String.join(", ", dataMap.keySet().stream().map(c -> "`%s` = VALUES(`%s`)".formatted(c, c)).toList());
-        final String sql = "INSERT INTO `%s`.`%s` (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s".formatted(database, collection, columnList, placeholders, onDuplicate);
+        final String sql = "INSERT INTO `%s`.`%s` (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s".formatted(databaseName, collectionName, columnList, placeholders, onDuplicate);
 
-        this.batchQueue.add(new MySqlWriteOperation(database, sql, values));
+        this.batchQueue.add(new MySqlWriteOperation(databaseName, sql, values));
     }
 
     /**
@@ -175,28 +179,28 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
      * <p>If a filter list is provided, the update matches on those fields
      * instead of {@code _id}.</p>
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param identifier the domain's UUID ({@code _id})
-     * @param filterList the filter conditions for matching, or empty/null to match on {@code _id}
-     * @param dataMap    the property name to value map of fields to update
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param identifier     the domain's UUID ({@code _id})
+     * @param filterList     the filter conditions for matching, or empty/null to match on {@code _id}
+     * @param dataMap        the property name to value map of fields to update
      */
     @Override
-    public void update(final String database, final String collection, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap) {
+    public void update(final String databaseName, final String collectionName, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap) {
         final List<Object> values = new ArrayList<>(dataMap.values().stream().map(this::toSqlValue).toList());
         final String setClause = String.join(", ", dataMap.keySet().stream().map("`%s` = ?"::formatted).toList());
 
         if (filterList != null && !filterList.isEmpty()) {
             final String where = this.buildWhereClause(filterList, values);
-            final String sql = "UPDATE `%s`.`%s` SET %s %s".formatted(database, collection, setClause, where);
+            final String sql = "UPDATE `%s`.`%s` SET %s %s".formatted(databaseName, collectionName, setClause, where);
 
-            this.batchQueue.add(new MySqlWriteOperation(database, sql, values));
+            this.batchQueue.add(new MySqlWriteOperation(databaseName, sql, values));
         } else {
             values.add(identifier.toString());
 
-            final String sql = "UPDATE `%s`.`%s` SET %s WHERE `_id` = ?".formatted(database, collection, setClause);
+            final String sql = "UPDATE `%s`.`%s` SET %s WHERE `_id` = ?".formatted(databaseName, collectionName, setClause);
 
-            this.batchQueue.add(new MySqlWriteOperation(database, sql, values));
+            this.batchQueue.add(new MySqlWriteOperation(databaseName, sql, values));
         }
     }
 
@@ -206,23 +210,23 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
      * <p>If a filter list is provided, the delete matches on those fields
      * instead of {@code _id}.</p>
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param identifier the domain's UUID ({@code _id})
-     * @param filterList the filter conditions for matching, or empty/null to match on {@code _id}
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param identifier     the domain's UUID ({@code _id})
+     * @param filterList     the filter conditions for matching, or empty/null to match on {@code _id}
      */
     @Override
-    public void delete(final String database, final String collection, final UUID identifier, final List<Filter> filterList) {
+    public void delete(final String databaseName, final String collectionName, final UUID identifier, final List<Filter> filterList) {
         if (filterList != null && !filterList.isEmpty()) {
             final List<Object> values = new ArrayList<>();
             final String where = this.buildWhereClause(filterList, values);
-            final String sql = "DELETE FROM `%s`.`%s` %s".formatted(database, collection, where);
+            final String sql = "DELETE FROM `%s`.`%s` %s".formatted(databaseName, collectionName, where);
 
-            this.batchQueue.add(new MySqlWriteOperation(database, sql, values));
+            this.batchQueue.add(new MySqlWriteOperation(databaseName, sql, values));
         } else {
-            final String sql = "DELETE FROM `%s`.`%s` WHERE `_id` = ?".formatted(database, collection);
+            final String sql = "DELETE FROM `%s`.`%s` WHERE `_id` = ?".formatted(databaseName, collectionName);
 
-            this.batchQueue.add(new MySqlWriteOperation(database, sql, List.of(identifier.toString())));
+            this.batchQueue.add(new MySqlWriteOperation(databaseName, sql, List.of(identifier.toString())));
         }
     }
 
@@ -291,18 +295,18 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
                 end++;
             }
 
-            try (final PreparedStatement statement = connection.prepareStatement(sql)) {
+            try (final PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
                 for (int i = index; i < end; i++) {
                     final List<Object> operationValues = operations.get(i).values();
 
                     for (int v = 0; v < operationValues.size(); v++) {
-                        statement.setObject(v + 1, operationValues.get(v));
+                        preparedStatement.setObject(v + 1, operationValues.get(v));
                     }
 
-                    statement.addBatch();
+                    preparedStatement.addBatch();
                 }
 
-                statement.executeBatch();
+                preparedStatement.executeBatch();
             }
 
             index = end;
@@ -312,21 +316,21 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
     /**
      * Synchronously finds a single row by its {@code _id}.
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param identifier the UUID to look up
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param identifier     the UUID to look up
      * @return an {@link Optional} containing the raw data map, or empty if not found
      */
     @Override
-    public Optional<LinkedHashMap<String, Object>> findOneSynchronously(final String database, final String collection, final UUID identifier) {
-        final String sql = "SELECT * FROM `%s`.`%s` WHERE `_id` = ? LIMIT 1".formatted(database, collection);
+    public Optional<LinkedHashMap<String, Object>> findOneSynchronously(final String databaseName, final String collectionName, final UUID identifier) {
+        final String sql = "SELECT * FROM `%s`.`%s` WHERE `_id` = ? LIMIT 1".formatted(databaseName, collectionName);
 
         try (final Connection connection = this.dataSource.getConnection();
-             final PreparedStatement statement = connection.prepareStatement(sql)) {
+             final PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
 
-            statement.setObject(1, identifier.toString());
+            preparedStatement.setObject(1, identifier.toString());
 
-            try (final ResultSet resultSet = statement.executeQuery()) {
+            try (final ResultSet resultSet = preparedStatement.executeQuery()) {
                 if (resultSet.next()) {
                     return Optional.of(this.resultSetToMap(resultSet));
                 }
@@ -341,25 +345,25 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
     /**
      * Synchronously finds a single row matching the given filters.
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param filters    the filter conditions to apply
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param filters        the filter conditions to apply
      * @return an {@link Optional} containing the raw data map, or empty if not found
      */
     @Override
-    public Optional<LinkedHashMap<String, Object>> findOneSynchronously(final String database, final String collection, final List<Filter> filters) {
+    public Optional<LinkedHashMap<String, Object>> findOneSynchronously(final String databaseName, final String collectionName, final List<Filter> filters) {
         final List<Object> values = new ArrayList<>();
         final String where = this.buildWhereClause(filters, values);
-        final String sql = "SELECT * FROM `%s`.`%s` %s LIMIT 1".formatted(database, collection, where);
+        final String sql = "SELECT * FROM `%s`.`%s` %s LIMIT 1".formatted(databaseName, collectionName, where);
 
         try (final Connection connection = this.dataSource.getConnection();
-             final PreparedStatement statement = connection.prepareStatement(sql)) {
+             final PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
 
             for (int i = 0; i < values.size(); i++) {
-                statement.setObject(i + 1, values.get(i));
+                preparedStatement.setObject(i + 1, values.get(i));
             }
 
-            try (final ResultSet resultSet = statement.executeQuery()) {
+            try (final ResultSet resultSet = preparedStatement.executeQuery()) {
                 if (resultSet.next()) {
                     return Optional.of(this.resultSetToMap(resultSet));
                 }
@@ -377,27 +381,27 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
      * <p>Applies {@code ORDER BY}, {@code LIMIT 1}, and {@code OFFSET} from the
      * {@link QueryOptions} to the generated SQL.</p>
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param options    the query options including filters, sort, and skip
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param options        the query options including filters, sort, and skip
      * @return an {@link Optional} containing the raw data map, or empty if not found
      */
     @Override
-    public Optional<LinkedHashMap<String, Object>> findOneSynchronously(final String database, final String collection, final QueryOptions options) {
+    public Optional<LinkedHashMap<String, Object>> findOneSynchronously(final String databaseName, final String collectionName, final QueryOptions options) {
         final List<Object> values = new ArrayList<>();
         final String where = this.buildWhereClause(options.getFilters(), values);
         final String orderBy = options.getField() != null ? " ORDER BY `%s` %s".formatted(options.getField(), this.toSqlDirection(options.getSortDirection())) : "";
         final String offset = options.getSkip() > 0 ? " OFFSET %d".formatted(options.getSkip()) : "";
-        final String sql = "SELECT * FROM `%s`.`%s` %s%s LIMIT 1%s".formatted(database, collection, where, orderBy, offset);
+        final String sql = "SELECT * FROM `%s`.`%s` %s%s LIMIT 1%s".formatted(databaseName, collectionName, where, orderBy, offset);
 
         try (final Connection connection = this.dataSource.getConnection();
-             final PreparedStatement statement = connection.prepareStatement(sql)) {
+             final PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
 
             for (int i = 0; i < values.size(); i++) {
-                statement.setObject(i + 1, values.get(i));
+                preparedStatement.setObject(i + 1, values.get(i));
             }
 
-            try (final ResultSet resultSet = statement.executeQuery()) {
+            try (final ResultSet resultSet = preparedStatement.executeQuery()) {
                 if (resultSet.next()) {
                     return Optional.of(this.resultSetToMap(resultSet));
                 }
@@ -412,26 +416,26 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
     /**
      * Synchronously finds all rows matching the given filters.
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param filters    the filter conditions to apply
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param filters        the filter conditions to apply
      * @return a list of raw data maps, empty if no matches
      */
     @Override
-    public List<LinkedHashMap<String, Object>> findManySynchronously(final String database, final String collection, final List<Filter> filters) {
+    public List<LinkedHashMap<String, Object>> findManySynchronously(final String databaseName, final String collectionName, final List<Filter> filters) {
         final List<LinkedHashMap<String, Object>> results = new ArrayList<>();
         final List<Object> values = new ArrayList<>();
         final String where = this.buildWhereClause(filters, values);
-        final String sql = "SELECT * FROM `%s`.`%s` %s".formatted(database, collection, where);
+        final String sql = "SELECT * FROM `%s`.`%s` %s".formatted(databaseName, collectionName, where);
 
         try (final Connection connection = this.dataSource.getConnection();
-             final PreparedStatement statement = connection.prepareStatement(sql)) {
+             final PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
 
             for (int i = 0; i < values.size(); i++) {
-                statement.setObject(i + 1, values.get(i));
+                preparedStatement.setObject(i + 1, values.get(i));
             }
 
-            try (final ResultSet resultSet = statement.executeQuery()) {
+            try (final ResultSet resultSet = preparedStatement.executeQuery()) {
                 while (resultSet.next()) {
                     results.add(this.resultSetToMap(resultSet));
                 }
@@ -449,29 +453,29 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
      * <p>Applies {@code ORDER BY}, {@code LIMIT}, and {@code OFFSET} from the
      * {@link QueryOptions} to the generated SQL.</p>
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param options    the query options including filters, sort, limit, and skip
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param options        the query options including filters, sort, limit, and skip
      * @return a list of raw data maps, empty if no matches
      */
     @Override
-    public List<LinkedHashMap<String, Object>> findManySynchronously(final String database, final String collection, final QueryOptions options) {
+    public List<LinkedHashMap<String, Object>> findManySynchronously(final String databaseName, final String collectionName, final QueryOptions options) {
         final List<LinkedHashMap<String, Object>> results = new ArrayList<>();
         final List<Object> values = new ArrayList<>();
         final String where = this.buildWhereClause(options.getFilters(), values);
         final String orderBy = options.getField() != null ? " ORDER BY `%s` %s".formatted(options.getField(), this.toSqlDirection(options.getSortDirection())) : "";
         final String limit = options.getLimit() > 0 ? " LIMIT %d".formatted(options.getLimit()) : "";
         final String offset = options.getSkip() > 0 ? " OFFSET %d".formatted(options.getSkip()) : "";
-        final String sql = "SELECT * FROM `%s`.`%s` %s%s%s%s".formatted(database, collection, where, orderBy, limit, offset);
+        final String sql = "SELECT * FROM `%s`.`%s` %s%s%s%s".formatted(databaseName, collectionName, where, orderBy, limit, offset);
 
         try (final Connection connection = this.dataSource.getConnection();
-             final PreparedStatement statement = connection.prepareStatement(sql)) {
+             final PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
 
             for (int i = 0; i < values.size(); i++) {
-                statement.setObject(i + 1, values.get(i));
+                preparedStatement.setObject(i + 1, values.get(i));
             }
 
-            try (final ResultSet resultSet = statement.executeQuery()) {
+            try (final ResultSet resultSet = preparedStatement.executeQuery()) {
                 while (resultSet.next()) {
                     results.add(this.resultSetToMap(resultSet));
                 }
@@ -486,86 +490,377 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
     /**
      * Asynchronously finds a single row by its {@code _id}.
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param identifier the UUID to look up
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param identifier     the UUID to look up
      * @return a future resolving to an {@link Optional} containing the raw data map
      */
     @Override
-    public CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneAsynchronously(final String database, final String collection, final UUID identifier) {
-        return CompletableFuture.supplyAsync(() -> this.findOneSynchronously(database, collection, identifier));
+    public CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneAsynchronously(final String databaseName, final String collectionName, final UUID identifier) {
+        return CompletableFuture.supplyAsync(() -> this.findOneSynchronously(databaseName, collectionName, identifier));
     }
 
     /**
      * Asynchronously finds a single row matching the given filters.
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param filters    the filter conditions to apply
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param filters        the filter conditions to apply
      * @return a future resolving to an {@link Optional} containing the raw data map
      */
     @Override
-    public CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneAsynchronously(final String database, final String collection, final List<Filter> filters) {
-        return CompletableFuture.supplyAsync(() -> this.findOneSynchronously(database, collection, filters));
+    public CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneAsynchronously(final String databaseName, final String collectionName, final List<Filter> filters) {
+        return CompletableFuture.supplyAsync(() -> this.findOneSynchronously(databaseName, collectionName, filters));
     }
 
     /**
      * Asynchronously finds a single row matching the given query options.
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param options    the query options including filters, sort, and skip
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param options        the query options including filters, sort, and skip
      * @return a future resolving to an {@link Optional} containing the raw data map
      */
     @Override
-    public CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneAsynchronously(final String database, final String collection, final QueryOptions options) {
-        return CompletableFuture.supplyAsync(() -> this.findOneSynchronously(database, collection, options));
+    public CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneAsynchronously(final String databaseName, final String collectionName, final QueryOptions options) {
+        return CompletableFuture.supplyAsync(() -> this.findOneSynchronously(databaseName, collectionName, options));
     }
 
     /**
      * Asynchronously finds all rows matching the given filters.
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param filters    the filter conditions to apply
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param filters        the filter conditions to apply
      * @return a future resolving to a list of raw data maps
      */
     @Override
-    public CompletableFuture<List<LinkedHashMap<String, Object>>> findManyAsynchronously(final String database, final String collection, final List<Filter> filters) {
-        return CompletableFuture.supplyAsync(() -> this.findManySynchronously(database, collection, filters));
+    public CompletableFuture<List<LinkedHashMap<String, Object>>> findManyAsynchronously(final String databaseName, final String collectionName, final List<Filter> filters) {
+        return CompletableFuture.supplyAsync(() -> this.findManySynchronously(databaseName, collectionName, filters));
     }
 
     /**
      * Asynchronously finds all rows matching the given query options.
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param options    the query options including filters, sort, limit, and skip
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param options        the query options including filters, sort, limit, and skip
      * @return a future resolving to a list of raw data maps
      */
     @Override
-    public CompletableFuture<List<LinkedHashMap<String, Object>>> findManyAsynchronously(final String database, final String collection, final QueryOptions options) {
-        return CompletableFuture.supplyAsync(() -> this.findManySynchronously(database, collection, options));
+    public CompletableFuture<List<LinkedHashMap<String, Object>>> findManyAsynchronously(final String databaseName, final String collectionName, final QueryOptions options) {
+        return CompletableFuture.supplyAsync(() -> this.findManySynchronously(databaseName, collectionName, options));
+    }
+
+    /**
+     * Synchronously reads a single projected property from one row by its {@code _id}.
+     *
+     * <p>Selects only the named column. If that column is of SQL type {@code JSON},
+     * the stored string is deserialized via {@link Gson} and normalized by
+     * {@link #normalizeValue}; otherwise the raw column value is returned.</p>
+     *
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param identifier     the UUID to look up
+     * @param propertyKey    the column to select and return
+     * @return an {@link Optional} containing the column value, or empty if the row is absent or the value is {@code null}
+     */
+    @Override
+    public Optional<Object> findOneByPropertySynchronously(final String databaseName, final String collectionName, final UUID identifier, final String propertyKey) {
+        final String sql = """
+                SELECT `%s`
+                FROM `%s`.`%s`
+                WHERE `_id` = ?
+                LIMIT 1
+                """.formatted(propertyKey, databaseName, collectionName);
+
+        try (final Connection connection = this.dataSource.getConnection();
+             final PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
+
+            preparedStatement.setString(1, identifier.toString());
+
+            try (final ResultSet resultSet = preparedStatement.executeQuery()) {
+                if (resultSet.next()) {
+                    Object value = resultSet.getObject(propertyKey);
+
+                    final ResultSetMetaData metaData = resultSet.getMetaData();
+                    final int columnIndex = resultSet.findColumn(propertyKey);
+
+                    if ("JSON".equalsIgnoreCase(metaData.getColumnTypeName(columnIndex)) && value instanceof final String jsonString) {
+                        value = this.normalizeValue(Constants.GSON.fromJson(jsonString, Object.class));
+                    }
+
+                    return value == null ? Optional.empty() : Optional.of(value);
+                }
+            }
+        } catch (final SQLException e) {
+            LOGGER.log(Level.SEVERE, "MySQL findOneByPropertySynchronously failed", e);
+        }
+
+        return Optional.empty();
+    }
+
+    /**
+     * Asynchronously reads a single projected property from one row by its {@code _id}.
+     *
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param identifier     the UUID to look up
+     * @param propertyKey    the column to select and return
+     * @return a future resolving to an {@link Optional} containing the column value
+     */
+    @Override
+    public CompletableFuture<Optional<Object>> findOneByPropertyAsynchronously(final String databaseName, final String collectionName, final UUID identifier, final String propertyKey) {
+        return CompletableFuture.supplyAsync(() -> this.findOneByPropertySynchronously(databaseName, collectionName, identifier, propertyKey));
+    }
+
+    /**
+     * Synchronously reads several projected properties from one row by its {@code _id}.
+     *
+     * <p>Selects only the named columns. The returned map preserves the requested key
+     * order. {@code JSON} columns are deserialized via {@link Gson} and normalized by
+     * {@link #normalizeValue}; other columns are returned as-is.</p>
+     *
+     * @param databaseName    the target database name
+     * @param collectionName  the target table name
+     * @param identifier      the UUID to look up
+     * @param propertyKeyList the columns to select and return
+     * @return an {@link Optional} containing a column-to-value map, or empty if the row is absent
+     */
+    @Override
+    public Optional<LinkedHashMap<String, Object>> findOneByManyPropertySynchronously(final String databaseName, final String collectionName, final UUID identifier, final List<String> propertyKeyList) {
+        final String columns = String.join(", ",
+                propertyKeyList.stream()
+                        .map("`%s`"::formatted)
+                        .toList()
+        );
+
+        final String sql = """
+                SELECT %s
+                FROM `%s`.`%s`
+                WHERE `_id` = ?
+                LIMIT 1
+                """.formatted(columns, databaseName, collectionName);
+
+        try (final Connection connection = this.dataSource.getConnection();
+             final PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
+
+            preparedStatement.setString(1, identifier.toString());
+
+            try (final ResultSet resultSet = preparedStatement.executeQuery()) {
+                if (resultSet.next()) {
+                    final LinkedHashMap<String, Object> map = new LinkedHashMap<>();
+                    final ResultSetMetaData metaData = resultSet.getMetaData();
+
+                    for (final String propertyKey : propertyKeyList) {
+                        Object value = resultSet.getObject(propertyKey);
+
+                        final int columnIndex = resultSet.findColumn(propertyKey);
+
+                        if ("JSON".equalsIgnoreCase(metaData.getColumnTypeName(columnIndex)) && value instanceof final String jsonString) {
+                            value = this.normalizeValue(Constants.GSON.fromJson(jsonString, Object.class));
+                        }
+
+                        map.put(propertyKey, value);
+                    }
+
+                    return Optional.of(map);
+                }
+            }
+        } catch (final SQLException e) {
+            LOGGER.log(Level.SEVERE, "MySQL findOneByManyPropertySynchronously failed", e);
+        }
+
+        return Optional.empty();
+    }
+
+    /**
+     * Asynchronously reads several projected properties from one row by its {@code _id}.
+     *
+     * @param databaseName    the target database name
+     * @param collectionName  the target table name
+     * @param identifier      the UUID to look up
+     * @param propertyKeyList the columns to select and return
+     * @return a future resolving to an {@link Optional} containing a column-to-value map
+     */
+    @Override
+    public CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneByManyPropertyAsynchronously(final String databaseName, final String collectionName, final UUID identifier, final List<String> propertyKeyList) {
+        return CompletableFuture.supplyAsync(() -> this.findOneByManyPropertySynchronously(databaseName, collectionName, identifier, propertyKeyList));
+    }
+
+    /**
+     * Synchronously reads a single projected property from many rows in one query.
+     *
+     * <p>Matches all identifiers via a parameterized {@code _id IN (...)} clause and
+     * selects the single named column, returning a map from each found {@code _id} to
+     * its value. If the column is of SQL type {@code JSON} its values are deserialized
+     * via {@link Gson} and normalized by {@link #normalizeValue}; the JSON-ness of the
+     * column is resolved once from the result metadata rather than per row. An empty
+     * identifier list short-circuits to an empty map, since {@code IN ()} is invalid SQL.</p>
+     *
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param identifierList the identifiers to resolve
+     * @param propertyKey    the column to select and return for each
+     * @return a map from identifier to its column value, empty if none match or the input list is empty
+     */
+    @Override
+    public LinkedHashMap<UUID, Object> findManyByOnePropertySynchronously(final String databaseName, final String collectionName, final List<UUID> identifierList, final String propertyKey) {
+        final LinkedHashMap<UUID, Object> results = new LinkedHashMap<>();
+
+        if (identifierList.isEmpty()) {
+            return results;
+        }
+
+        final String placeholders = String.join(", ", identifierList.stream().map(id -> "?").toList());
+        final String sql = """
+                SELECT `_id`, `%s`
+                FROM `%s`.`%s`
+                WHERE `_id` IN (%s)
+                """.formatted(propertyKey, databaseName, collectionName, placeholders);
+
+        try (final Connection connection = this.dataSource.getConnection();
+             final PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
+
+            for (int i = 0; i < identifierList.size(); i++) {
+                preparedStatement.setString(i + 1, identifierList.get(i).toString());
+            }
+
+            try (final ResultSet resultSet = preparedStatement.executeQuery()) {
+                final ResultSetMetaData metaData = resultSet.getMetaData();
+                final int propertyColumnIndex = resultSet.findColumn(propertyKey);
+                final boolean isJson = "JSON".equalsIgnoreCase(metaData.getColumnTypeName(propertyColumnIndex));
+
+                while (resultSet.next()) {
+                    Object value = resultSet.getObject(propertyKey);
+
+                    if (isJson && value instanceof final String jsonString) {
+                        value = this.normalizeValue(Constants.GSON.fromJson(jsonString, Object.class));
+                    }
+
+                    results.put(UUID.fromString(resultSet.getString("_id")), value);
+                }
+            }
+        } catch (final SQLException e) {
+            LOGGER.log(Level.SEVERE, "MySQL findManyByOnePropertySynchronously failed", e);
+        }
+
+        return results;
+    }
+
+    /**
+     * Asynchronously reads a single projected property from many rows in one query.
+     *
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param identifierList the identifiers to resolve
+     * @param propertyKey    the column to select and return for each
+     * @return a future resolving to a map from identifier to its column value
+     */
+    @Override
+    public CompletableFuture<LinkedHashMap<UUID, Object>> findManyByOnePropertyAsynchronously(final String databaseName, final String collectionName, final List<UUID> identifierList, final String propertyKey) {
+        return CompletableFuture.supplyAsync(() -> this.findManyByOnePropertySynchronously(databaseName, collectionName, identifierList, propertyKey));
+    }
+
+    /**
+     * Synchronously reads several projected properties from many rows in one query.
+     *
+     * <p>Matches all identifiers via a parameterized {@code _id IN (...)} clause and
+     * selects the named columns, returning a map from each found {@code _id} to a
+     * column-to-value map. Each inner map preserves the requested key order. {@code JSON}
+     * columns are deserialized via {@link Gson} and normalized by {@link #normalizeValue};
+     * other columns are returned as-is. An empty identifier list short-circuits to an
+     * empty map, since {@code IN ()} is invalid SQL.</p>
+     *
+     * @param databaseName    the target database name
+     * @param collectionName  the target table name
+     * @param identifierList  the identifiers to resolve
+     * @param propertyKeyList the columns to select and return for each
+     * @return a map from identifier to its column-to-value map, empty if none match or the input list is empty
+     */
+    @Override
+    public LinkedHashMap<UUID, LinkedHashMap<String, Object>> findManyByManyPropertySynchronously(final String databaseName, final String collectionName, final List<UUID> identifierList, final List<String> propertyKeyList) {
+        final LinkedHashMap<UUID, LinkedHashMap<String, Object>> results = new LinkedHashMap<>();
+
+        if (identifierList.isEmpty()) {
+            return results;
+        }
+
+        final String columns = String.join(", ", propertyKeyList.stream().map("`%s`"::formatted).toList());
+        final String placeholders = String.join(", ", identifierList.stream().map(id -> "?").toList());
+        final String sql = """
+                SELECT `_id`, %s
+                FROM `%s`.`%s`
+                WHERE `_id` IN (%s)
+                """.formatted(columns, databaseName, collectionName, placeholders);
+
+        try (final Connection connection = this.dataSource.getConnection();
+             final PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
+
+            for (int i = 0; i < identifierList.size(); i++) {
+                preparedStatement.setString(i + 1, identifierList.get(i).toString());
+            }
+
+            try (final ResultSet resultSet = preparedStatement.executeQuery()) {
+                final ResultSetMetaData metaData = resultSet.getMetaData();
+
+                while (resultSet.next()) {
+                    final LinkedHashMap<String, Object> map = new LinkedHashMap<>();
+
+                    for (final String propertyKey : propertyKeyList) {
+                        Object value = resultSet.getObject(propertyKey);
+
+                        final int columnIndex = resultSet.findColumn(propertyKey);
+
+                        if ("JSON".equalsIgnoreCase(metaData.getColumnTypeName(columnIndex)) && value instanceof final String jsonString) {
+                            value = this.normalizeValue(Constants.GSON.fromJson(jsonString, Object.class));
+                        }
+
+                        map.put(propertyKey, value);
+                    }
+
+                    results.put(UUID.fromString(resultSet.getString("_id")), map);
+                }
+            }
+        } catch (final SQLException e) {
+            LOGGER.log(Level.SEVERE, "MySQL findManyByManyPropertySynchronously failed", e);
+        }
+
+        return results;
+    }
+
+    /**
+     * Asynchronously reads several projected properties from many rows in one query.
+     *
+     * @param databaseName    the target database name
+     * @param collectionName  the target table name
+     * @param identifierList  the identifiers to resolve
+     * @param propertyKeyList the columns to select and return for each
+     * @return a future resolving to a map from identifier to its column-to-value map
+     */
+    @Override
+    public CompletableFuture<LinkedHashMap<UUID, LinkedHashMap<String, Object>>> findManyByManyPropertyAsynchronously(final String databaseName, final String collectionName, final List<UUID> identifierList, final List<String> propertyKeyList) {
+        return CompletableFuture.supplyAsync(() -> this.findManyByManyPropertySynchronously(databaseName, collectionName, identifierList, propertyKeyList));
     }
 
     /**
      * Checks row existence using {@code SELECT 1 ... LIMIT 1} for maximum efficiency.
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param identifier the UUID to check
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param identifier     the UUID to check
      * @return {@code true} if the row exists
      */
     @Override
-    public boolean exists(final String database, final String collection, final UUID identifier) {
-        final String sql = "SELECT 1 FROM `%s`.`%s` WHERE `_id` = ? LIMIT 1".formatted(database, collection);
+    public boolean exists(final String databaseName, final String collectionName, final UUID identifier) {
+        final String sql = "SELECT 1 FROM `%s`.`%s` WHERE `_id` = ? LIMIT 1".formatted(databaseName, collectionName);
 
         try (final Connection connection = this.dataSource.getConnection();
-             final PreparedStatement statement = connection.prepareStatement(sql)) {
+             final PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
 
-            statement.setObject(1, identifier.toString());
+            preparedStatement.setObject(1, identifier.toString());
 
-            try (final ResultSet resultSet = statement.executeQuery()) {
+            try (final ResultSet resultSet = preparedStatement.executeQuery()) {
                 return resultSet.next();
             }
         } catch (final SQLException e) {
@@ -578,18 +873,18 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
     /**
      * Returns the total number of rows in the table.
      *
-     * @param database   the target database name
-     * @param collection the target table name
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
      * @return the row count
      */
     @Override
-    public long count(final String database, final String collection) {
-        final String sql = "SELECT COUNT(*) FROM `%s`.`%s`".formatted(database, collection);
+    public long count(final String databaseName, final String collectionName) {
+        final String sql = "SELECT COUNT(*) FROM `%s`.`%s`".formatted(databaseName, collectionName);
 
         try (final Connection connection = this.dataSource.getConnection();
-             final PreparedStatement statement = connection.prepareStatement(sql)) {
+             final PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
 
-            try (final ResultSet resultSet = statement.executeQuery()) {
+            try (final ResultSet resultSet = preparedStatement.executeQuery()) {
                 if (resultSet.next()) {
                     return resultSet.getLong(1);
                 }
@@ -604,25 +899,25 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
     /**
      * Returns the number of rows matching the given filters.
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param filters    the filter conditions to apply
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param filters        the filter conditions to apply
      * @return the matching row count
      */
     @Override
-    public long count(final String database, final String collection, final List<Filter> filters) {
+    public long count(final String databaseName, final String collectionName, final List<Filter> filters) {
         final List<Object> values = new ArrayList<>();
         final String where = this.buildWhereClause(filters, values);
-        final String sql = "SELECT COUNT(*) FROM `%s`.`%s` %s".formatted(database, collection, where);
+        final String sql = "SELECT COUNT(*) FROM `%s`.`%s` %s".formatted(databaseName, collectionName, where);
 
         try (final Connection connection = this.dataSource.getConnection();
-             final PreparedStatement statement = connection.prepareStatement(sql)) {
+             final PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
 
             for (int i = 0; i < values.size(); i++) {
-                statement.setObject(i + 1, values.get(i));
+                preparedStatement.setObject(i + 1, values.get(i));
             }
 
-            try (final ResultSet resultSet = statement.executeQuery()) {
+            try (final ResultSet resultSet = preparedStatement.executeQuery()) {
                 if (resultSet.next()) {
                     return resultSet.getLong(1);
                 }
@@ -641,26 +936,26 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
      * index name based on the table and field names. Duplicate index errors are
      * silently ignored.</p>
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param index      the index definition
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param index          the index definition
      */
     @Override
-    public void createIndex(final String database, final String collection, final Index index) {
+    public void createIndex(final String databaseName, final String collectionName, final Index index) {
         final List<String> columns = new ArrayList<>();
 
         for (final IndexEntry entry : index.getEntries()) {
             columns.add("`%s` %s".formatted(entry.getField(), this.toSqlDirection(entry.getDirection())));
         }
 
-        final String indexName = "idx_%s_%s".formatted(collection, String.join("_", index.getEntries().stream().map(IndexEntry::getField).toList()));
+        final String indexName = "idx_%s_%s".formatted(collectionName, String.join("_", index.getEntries().stream().map(IndexEntry::getField).toList()));
         final String unique = index.isUnique() ? "UNIQUE " : "";
-        final String sql = "CREATE %sINDEX `%s` ON `%s`.`%s` (%s)".formatted(unique, indexName, database, collection, String.join(", ", columns));
+        final String sql = "CREATE %sINDEX `%s` ON `%s`.`%s` (%s)".formatted(unique, indexName, databaseName, collectionName, String.join(", ", columns));
 
         try (final Connection connection = this.dataSource.getConnection();
-             final PreparedStatement statement = connection.prepareStatement(sql)) {
+             final PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
 
-            statement.executeUpdate();
+            preparedStatement.executeUpdate();
         } catch (final SQLException e) {
             if (!(e.getMessage().contains("Duplicate"))) {
                 LOGGER.log(Level.SEVERE, "MySQL createIndex failed", e);
@@ -675,18 +970,18 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
      * once per {@code database.collection} combination for the lifetime
      * of this driver instance.</p>
      *
-     * @param database   the target database name
-     * @param collection the target table name
-     * @param dataMap    the data map used to infer column types
+     * @param databaseName   the target database name
+     * @param collectionName the target table name
+     * @param dataMap        the data map used to infer column types
      */
-    private void ensureTable(final String database, final String collection, final LinkedHashMap<String, Object> dataMap) {
-        final String key = "%s.%s".formatted(database, collection);
+    private void ensureTable(final String databaseName, final String collectionName, final LinkedHashMap<String, Object> dataMap) {
+        final String key = "%s.%s".formatted(databaseName, collectionName);
 
         if (this.ensuredTables.contains(key)) {
             return;
         }
 
-        this.ensureDatabase(database);
+        this.ensureDatabase(databaseName);
 
         final List<String> columns = new ArrayList<>();
         columns.add("`_id` VARCHAR(36) NOT NULL PRIMARY KEY");
@@ -695,12 +990,12 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
             columns.add("`%s` %s".formatted(entry.getKey(), this.toSqlType(entry.getValue())));
         }
 
-        final String sql = "CREATE TABLE IF NOT EXISTS `%s`.`%s` (%s)".formatted(database, collection, String.join(", ", columns));
+        final String sql = "CREATE TABLE IF NOT EXISTS `%s`.`%s` (%s)".formatted(databaseName, collectionName, String.join(", ", columns));
 
         try (final Connection connection = this.dataSource.getConnection();
-             final PreparedStatement statement = connection.prepareStatement(sql)) {
+             final PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
 
-            statement.executeUpdate();
+            preparedStatement.executeUpdate();
 
             this.ensuredTables.add(key);
         } catch (final SQLException e) {
@@ -711,15 +1006,15 @@ public class MySqlDatabaseDriver implements DatabaseDriver {
     /**
      * Creates the target database if it does not exist.
      *
-     * @param database the database name to ensure
+     * @param databaseName the database name to ensure
      */
-    private void ensureDatabase(final String database) {
-        final String sql = "CREATE DATABASE IF NOT EXISTS `%s`".formatted(database);
+    private void ensureDatabase(final String databaseName) {
+        final String sql = "CREATE DATABASE IF NOT EXISTS `%s`".formatted(databaseName);
 
         try (final Connection connection = this.dataSource.getConnection();
-             final PreparedStatement statement = connection.prepareStatement(sql)) {
+             final PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
 
-            statement.executeUpdate();
+            preparedStatement.executeUpdate();
         } catch (final SQLException e) {
             LOGGER.log(Level.SEVERE, "MySQL ensureDatabase failed", e);
         }

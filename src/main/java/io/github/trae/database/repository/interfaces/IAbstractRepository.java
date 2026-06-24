@@ -9,6 +9,7 @@ import io.github.trae.database.repository.annotations.Repository;
 import io.github.trae.utilities.UtilGeneric;
 
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -71,6 +72,22 @@ public interface IAbstractRepository<Domain extends io.github.trae.database.doma
     CompletableFuture<List<Domain>> findManyAsynchronously(final List<Filter> filters);
 
     CompletableFuture<List<Domain>> findManyAsynchronously(final QueryOptions queryOptions);
+
+    Optional<Object> findOneByPropertySynchronously(final UUID identifier, final Property property);
+
+    CompletableFuture<Optional<Object>> findOneByPropertyAsynchronously(final UUID identifier, final Property property);
+
+    LinkedHashMap<Property, Object> findOneByManyPropertySynchronously(final UUID identifier, final List<Property> propertyList);
+
+    CompletableFuture<Optional<LinkedHashMap<Property, Object>>> findOneByManyPropertyAsynchronously(final UUID identifier, final List<Property> propertyList);
+
+    LinkedHashMap<UUID, Object> findManyByOnePropertySynchronously(final List<UUID> identifierList, final Property property);
+
+    CompletableFuture<LinkedHashMap<UUID, Object>> findManyByOnePropertyAsynchronously(final List<UUID> identifierList, final Property property);
+
+    LinkedHashMap<UUID, LinkedHashMap<Property, Object>> findManyByManyPropertySynchronously(final List<UUID> identifierList, final List<Property> propertyList);
+
+    CompletableFuture<LinkedHashMap<UUID, LinkedHashMap<Property, Object>>> findManyByManyPropertyAsynchronously(final List<UUID> identifierList, final List<Property> propertyList);
 
     boolean exists(final UUID identifier);
 

@@ -254,6 +254,133 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
     }
 
     /**
+     * Synchronously reads a single property value from one domain by its identifier.
+     *
+     * @param identifier the UUID to look up
+     * @param property   the property to project and return
+     * @return an {@link Optional} containing the property value, or empty if the domain or property is absent
+     */
+    @Override
+    public Optional<Object> findOneByPropertySynchronously(final UUID identifier, final Property property) {
+        return this.databaseDriver.findOneByPropertySynchronously(this.getDatabaseName(), this.getCollectionName(), identifier, property.name());
+    }
+
+    /**
+     * Asynchronously reads a single property value from one domain by its identifier.
+     *
+     * @param identifier the UUID to look up
+     * @param property   the property to project and return
+     * @return a future resolving to an {@link Optional} containing the property value
+     */
+    @Override
+    public CompletableFuture<Optional<Object>> findOneByPropertyAsynchronously(final UUID identifier, final Property property) {
+        return this.databaseDriver.findOneByPropertyAsynchronously(this.getDatabaseName(), this.getCollectionName(), identifier, property.name());
+    }
+
+    /**
+     * Synchronously reads several property values from one domain by its identifier.
+     *
+     * <p>Projects only the named properties and re-keys the driver's raw {@code String}
+     * map back to {@link Property} constants via {@link #toPropertyMap}. Returns an empty
+     * map if the domain is absent.</p>
+     *
+     * @param identifier   the UUID to look up
+     * @param propertyList the properties to project and return
+     * @return a property-to-value map, empty if the domain is not found
+     */
+    @Override
+    public LinkedHashMap<Property, Object> findOneByManyPropertySynchronously(final UUID identifier, final List<Property> propertyList) {
+        return this.databaseDriver.findOneByManyPropertySynchronously(this.getDatabaseName(), this.getCollectionName(), identifier, propertyList.stream().map(Property::name).toList())
+                .map(this::toPropertyMap)
+                .orElseGet(LinkedHashMap::new);
+    }
+
+    /**
+     * Asynchronously reads several property values from one domain by its identifier.
+     *
+     * @param identifier   the UUID to look up
+     * @param propertyList the properties to project and return
+     * @return a future resolving to an {@link Optional} containing a property-to-value map
+     */
+    @Override
+    public CompletableFuture<Optional<LinkedHashMap<Property, Object>>> findOneByManyPropertyAsynchronously(final UUID identifier, final List<Property> propertyList) {
+        return this.databaseDriver.findOneByManyPropertyAsynchronously(this.getDatabaseName(), this.getCollectionName(), identifier, propertyList.stream().map(Property::name).toList())
+                .thenApply(optional -> optional.map(this::toPropertyMap));
+    }
+
+    /**
+     * Synchronously reads a single property value from many domains in one query.
+     *
+     * <p>Resolves all identifiers in a single round trip, returning a map from each found
+     * identifier to its property value. Identifiers with no matching domain are absent.</p>
+     *
+     * @param identifierList the identifiers to resolve
+     * @param property       the property to project and return for each
+     * @return a map from identifier to its property value, empty if none match
+     */
+    @Override
+    public LinkedHashMap<UUID, Object> findManyByOnePropertySynchronously(final List<UUID> identifierList, final Property property) {
+        return this.databaseDriver.findManyByOnePropertySynchronously(this.getDatabaseName(), this.getCollectionName(), identifierList, property.name());
+    }
+
+    /**
+     * Asynchronously reads a single property value from many domains in one query.
+     *
+     * @param identifierList the identifiers to resolve
+     * @param property       the property to project and return for each
+     * @return a future resolving to a map from identifier to its property value
+     */
+    @Override
+    public CompletableFuture<LinkedHashMap<UUID, Object>> findManyByOnePropertyAsynchronously(final List<UUID> identifierList, final Property property) {
+        return this.databaseDriver.findManyByOnePropertyAsynchronously(this.getDatabaseName(), this.getCollectionName(), identifierList, property.name());
+    }
+
+    /**
+     * Synchronously reads several property values from many domains in one query.
+     *
+     * <p>Resolves all identifiers in a single round trip, returning a map from each found
+     * identifier to its property-to-value map. Each inner map is re-keyed from the driver's
+     * raw {@code String} keys back to {@link Property} constants via {@link #toPropertyMap}.</p>
+     *
+     * @param identifierList the identifiers to resolve
+     * @param propertyList   the properties to project and return for each
+     * @return a map from identifier to its property-to-value map, empty if none match
+     */
+    @Override
+    public LinkedHashMap<UUID, LinkedHashMap<Property, Object>> findManyByManyPropertySynchronously(final List<UUID> identifierList, final List<Property> propertyList) {
+        final LinkedHashMap<UUID, LinkedHashMap<String, Object>> raw = this.databaseDriver.findManyByManyPropertySynchronously(this.getDatabaseName(), this.getCollectionName(), identifierList, propertyList.stream().map(Property::name).toList());
+
+        final LinkedHashMap<UUID, LinkedHashMap<Property, Object>> result = new LinkedHashMap<>();
+
+        for (final Map.Entry<UUID, LinkedHashMap<String, Object>> entry : raw.entrySet()) {
+            result.put(entry.getKey(), this.toPropertyMap(entry.getValue()));
+        }
+
+        return result;
+    }
+
+    /**
+     * Asynchronously reads several property values from many domains in one query.
+     *
+     * @param identifierList the identifiers to resolve
+     * @param propertyList   the properties to project and return for each
+     * @return a future resolving to a map from identifier to its property-to-value map
+     */
+    @Override
+    public CompletableFuture<LinkedHashMap<UUID, LinkedHashMap<Property, Object>>> findManyByManyPropertyAsynchronously(final List<UUID> identifierList, final List<Property> propertyList) {
+        return this.databaseDriver.findManyByManyPropertyAsynchronously(this.getDatabaseName(), this.getCollectionName(), identifierList, propertyList.stream().map(Property::name).toList())
+                .thenApply(raw -> {
+                    final LinkedHashMap<UUID, LinkedHashMap<Property, Object>> result = new LinkedHashMap<>();
+
+                    for (final Map.Entry<UUID, LinkedHashMap<String, Object>> entry : raw.entrySet()) {
+                        result.put(entry.getKey(), this.toPropertyMap(entry.getValue()));
+                    }
+
+                    return result;
+                });
+    }
+
+    /**
      * Checks whether a domain with the given identifier exists in the collection.
      *
      * @param identifier the UUID to check
@@ -283,6 +410,11 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
     @Override
     public long count(final List<Filter> filters) {
         return this.databaseDriver.count(this.getDatabaseName(), this.getCollectionName(), filters);
+    }
+
+    @Override
+    public void registerIndexes() {
+
     }
 
     /**
@@ -422,5 +554,31 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
                 map.put(property.name(), value);
             }
         });
+    }
+
+    /**
+     * Re-keys a driver result map from raw property names back to {@link Property} constants.
+     *
+     * <p>The driver returns property keys as {@code String} (each a {@link Property#name()}).
+     * This resolves each name to its enum constant via the property class returned by
+     * {@link #getClassOfProperty()}, preserving the original iteration order and values.</p>
+     *
+     * <p>The raw-type cast on {@link Enum#valueOf} is required because {@code Property} is
+     * declared as {@code Enum<?>} rather than {@code Enum<Property>}, so the compiler cannot
+     * satisfy {@code valueOf}'s {@code <T extends Enum<T>>} bound; it is safe at runtime since
+     * {@link #getClassOfProperty()} returns the concrete enum class.</p>
+     *
+     * @param raw the driver's property-name-to-value map
+     * @return a map keyed by {@link Property} constants
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private LinkedHashMap<Property, Object> toPropertyMap(final LinkedHashMap<String, Object> raw) {
+        final LinkedHashMap<Property, Object> result = new LinkedHashMap<>();
+
+        for (final Map.Entry<String, Object> entry : raw.entrySet()) {
+            result.put((Property) Enum.valueOf((Class) this.getClassOfProperty(), entry.getKey()), entry.getValue());
+        }
+
+        return result;
     }
 }
