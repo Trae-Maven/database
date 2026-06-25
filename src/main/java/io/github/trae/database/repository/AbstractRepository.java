@@ -11,7 +11,6 @@ import io.github.trae.database.filter.Filter;
 import io.github.trae.database.index.Index;
 import io.github.trae.database.query.QueryOptions;
 import io.github.trae.database.repository.interfaces.IAbstractRepository;
-import io.github.trae.di.annotations.type.DependsOn;
 import io.github.trae.utilities.UtilGeneric;
 import io.github.trae.utilities.UtilJava;
 import lombok.Getter;
@@ -31,9 +30,10 @@ import java.util.concurrent.CompletableFuture;
  * Base repository implementation providing all CRUD, query, and index operations.
  *
  * <p>Concrete repositories extend this class and typically contain no additional
- * logic — all boilerplate is handled here. The only required overrides are the
- * constructor (to pass the {@link DatabaseDriver}) and optionally
- * {@link #registerIndexes()} to declare indexes.</p>
+ * logic — all boilerplate is handled here. The only required override is the
+ * constructor (to pass the {@link DatabaseDriver} and the database/collection
+ * names); {@link #registerIndexes()} may optionally be overridden to declare
+ * indexes.</p>
  *
  * <p>Write operations delegate to the driver which routes them through the
  * {@link io.github.trae.database.batch.BatchQueue} for batched execution.
@@ -52,11 +52,10 @@ import java.util.concurrent.CompletableFuture;
  *
  * <p>Example concrete repository:</p>
  * <pre>{@code
- * @Repository(databaseName = "Admin", collectionName = "Accounts")
  * public class AccountRepository extends AbstractRepository<Account, AccountProperty> {
  *
  *     public AccountRepository(final DatabaseDriver databaseDriver) {
- *         super(databaseDriver);
+ *         super(databaseDriver, "Admin", "Accounts");
  *     }
  *
  *     @Override
@@ -69,15 +68,16 @@ import java.util.concurrent.CompletableFuture;
  * @param <Domain>   the domain type this repository manages
  * @param <Property> the property enum type defining the domain's fields
  * @see IAbstractRepository
- * @see io.github.trae.database.repository.annotations.Repository
  * @see DatabaseDriver
  */
-@DependsOn(values = DatabaseDriver.class)
 public abstract class AbstractRepository<Domain extends io.github.trae.database.domain.models.Domain<Property>, Property extends Enum<?> & DomainProperty> implements IAbstractRepository<Domain, Property> {
 
     private final List<Index> indexList = new ArrayList<>();
 
     private final DatabaseDriver databaseDriver;
+
+    @Getter
+    private final String databaseName, collectionName;
 
     /**
      * Whether this repository has completed its initial data load.
@@ -95,8 +95,11 @@ public abstract class AbstractRepository<Domain extends io.github.trae.database.
      *
      * @param databaseDriver the driver used for all database operations
      */
-    public AbstractRepository(final DatabaseDriver databaseDriver) {
+    public AbstractRepository(final DatabaseDriver databaseDriver, final String databaseName, final String collectionName) {
         this.databaseDriver = databaseDriver;
+
+        this.databaseName = databaseName;
+        this.collectionName = collectionName;
 
         DatabaseApi.addRepository(this);
     }

@@ -5,7 +5,6 @@ import io.github.trae.database.domain.models.DomainProperty;
 import io.github.trae.database.filter.Filter;
 import io.github.trae.database.index.Index;
 import io.github.trae.database.query.QueryOptions;
-import io.github.trae.database.repository.annotations.Repository;
 import io.github.trae.utilities.UtilGeneric;
 
 import java.util.Collections;
@@ -29,14 +28,6 @@ public interface IAbstractRepository<Domain extends io.github.trae.database.doma
 
     default Class<? extends Domain> getDomainTypeByData(final DomainData<Property> domainData) {
         return this.getClassOfDomain();
-    }
-
-    default String getDatabaseName() {
-        return this.getClass().getAnnotation(Repository.class).databaseName();
-    }
-
-    default String getCollectionName() {
-        return this.getClass().getAnnotation(Repository.class).collectionName();
     }
 
     default List<Filter> getFiltersByDomain(final Domain domain) {

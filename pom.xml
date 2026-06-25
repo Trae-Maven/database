@@ -10,7 +10,7 @@
 
     <name>Database</name>
 
-    <description>A unified database abstraction layer providing annotation-driven domain mapping, repository-based CRUD operations, local and distributed key-value storage with per-key TTL, and multi-backend support for MongoDB, MySQL, and Redis. Works alongside the dependency injector for automatic repository discovery and injection.</description>
+    <description>A unified database abstraction layer providing property-enum-driven domain mapping, repository-based CRUD operations, local and distributed key-value storage with per-key TTL, and multi-backend support for MongoDB, MySQL, and Redis.</description>
 
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
@@ -28,8 +28,8 @@
 
     <repositories>
         <repository>
-            <id>github-dependency-injector</id>
-            <url>https://maven.pkg.github.com/Trae-Maven/dependency-injector</url>
+            <id>github-utilities</id>
+            <url>https://maven.pkg.github.com/Trae-Maven/utilities</url>
         </repository>
     </repositories>
 
@@ -43,7 +43,7 @@
 
         <dependency>
             <groupId>io.github.trae</groupId>
-            <artifactId>dependency-injector</artifactId>
+            <artifactId>utilities</artifactId>
             <version>0.0.1</version>
         </dependency>
 

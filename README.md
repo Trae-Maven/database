@@ -1,8 +1,8 @@
 # Database
 
-A unified database abstraction layer providing annotation-driven domain mapping, repository-based CRUD operations, local/remote storage with TTL support, and multi-backend support for MongoDB, MySQL, and Redis.
+A unified database abstraction layer providing property-enum-driven domain mapping, repository-based CRUD operations, local/remote storage with TTL support, and multi-backend support for MongoDB, MySQL, and Redis.
 
-Database eliminates boilerplate by handling serialization, deserialization, batched writes, filtering, indexing, and async operations behind a single `DatabaseDriver` interface. Define a domain, annotate a repository, and the framework does the rest.
+Database eliminates boilerplate by handling serialization, deserialization, batched writes, filtering, indexing, and async operations behind a single `DatabaseDriver` interface. Define a domain, set up a repository, and the framework does the rest.
 
 ---
 
@@ -42,10 +42,9 @@ These dependencies are marked as **provided** inside Database because they are e
 
 ## Built-in Dependencies
 
-Database includes several dependencies that are automatically included when you install the library.
+Database includes the following dependency that is automatically included when you install the library.
 
 - [Utilities](https://github.com/Trae-Maven/utilities) – Shared helper classes and performance-focused utilities used internally by the framework.
-- [Dependency-Injector](https://github.com/Trae-Maven/dependency-injector) – Component scanning and injection; `@Repository` is meta-annotated with `@Component` for automatic discovery.
 
 **MongoDB backend:**
 ```xml
@@ -152,13 +151,15 @@ public class Account implements Domain<AccountProperty> {
 
 ### 3. Create Your Repository
 
-Extend `AbstractRepository` and annotate with `@Repository`. All CRUD, filtering, and async operations are inherited — zero boilerplate. Override `registerIndexes()` to declare indexes:
+Extend `AbstractRepository` and pass the database/collection names through the constructor. All CRUD, filtering, and async operations are inherited — zero boilerplate. Override `registerIndexes()` to declare indexes.
+
+If you're using Spring Boot or [dependency-injector](https://github.com/Trae-Maven/dependency-injector) for component scanning, annotate the class with `@Component`:
 ```java
-@Repository(databaseName = "Admin", collectionName = "Accounts")
+@Component
 public class AccountRepository extends AbstractRepository<Account, AccountProperty> {
 
     public AccountRepository(final DatabaseDriver databaseDriver) {
-        super(databaseDriver);
+        super(databaseDriver, "Admin", "Accounts");
     }
 
     @Override
@@ -343,11 +344,11 @@ By default, all write operations (save, update, delete) match documents by their
 A user can wishlist many products, but only once per product. Saving the same combination again updates the existing entry (e.g. refreshing the timestamp) rather than creating a duplicate:
 
 ```java
-@Repository(databaseName = "Shop", collectionName = "Wishlists")
+@Component
 public class WishlistRepository extends AbstractRepository<WishlistEntry, WishlistProperty> {
 
     public WishlistRepository(final DatabaseDriver databaseDriver) {
-        super(databaseDriver);
+        super(databaseDriver, "Shop", "Wishlists");
     }
 
     @Override
@@ -382,11 +383,11 @@ This works identically on both backends:
 A student can enrol in many courses, but only once per course. Subsequent saves update the enrolment status rather than duplicating:
 
 ```java
-@Repository(databaseName = "University", collectionName = "Enrolments")
+@Component
 public class EnrolmentRepository extends AbstractRepository<Enrolment, EnrolmentProperty> {
 
     public EnrolmentRepository(final DatabaseDriver databaseDriver) {
-        super(databaseDriver);
+        super(databaseDriver, "University", "Enrolments");
     }
 
     @Override
@@ -606,7 +607,6 @@ Storage<Key, Value> (unified caching interface)
 | **DomainProperty** | Enum defining the persistable fields on a domain |
 | **DomainData** | Intermediate carrier wrapping raw database results for typed access |
 | **AbstractRepository** | All CRUD, sync/async reads, exists, count, index management, domain mapping, filter-based write matching |
-| **@Repository** | Annotation specifying database and collection names, meta-annotated with `@Component` |
 | **DatabaseDriver** | Backend-agnostic interface for all database operations |
 | **MongoDatabaseDriver** | MongoDB implementation with `bulkWrite` batching and compound filter support |
 | **MySqlDatabaseDriver** | MySQL implementation with HikariCP, transactional batching, and unique index conflict resolution |
