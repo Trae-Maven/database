@@ -1,10 +1,12 @@
 package io.github.trae.database.repository;
 
+import io.github.trae.database.DatabaseApi;
 import io.github.trae.database.batch.enums.OperationType;
 import io.github.trae.database.driver.DatabaseDriver;
 import io.github.trae.database.entity.property.EntityProperty;
 import io.github.trae.database.repository.enums.IndexType;
 import lombok.Getter;
+import lombok.Setter;
 import org.jooq.Condition;
 import org.jooq.CreateTableElementListStep;
 import org.jooq.Field;
@@ -38,9 +40,9 @@ import java.util.UUID;
  *
  * <p>Schema work is driven by the properties registered against the entity type,
  * each of which carries its own column type. The repository registers itself
- * with the driver on construction, and the driver runs
+ * with {@link DatabaseApi} on construction, and the driver runs
  * {@link #createTable()}, {@link #migrateSchema()} and {@link #createIndexes()}
- * across every repository during {@link DatabaseDriver#connect()}.</p>
+ * across every registered repository during {@link DatabaseDriver#connect()}.</p>
  *
  * @param <Entity> the entity type this repository serves
  * @see EntityProperty
@@ -88,17 +90,30 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
     private final Constructor<Entity> entityConstructor;
 
     /**
+     * Whether this repository has finished loading whatever it needs at startup.
+     *
+     * <p>Set by the consumer once the repository is ready — after a warm-up read,
+     * a cache prime, or whatever that entity's startup involves.
+     * {@link DatabaseApi#isDatabaseLoaded()} reports true only once every
+     * registered repository has been marked, giving the application one flag to
+     * gate on before it starts serving.</p>
+     */
+    @Setter
+    private boolean loaded;
+
+    /**
      * Resolves the entity's constructor and registers with the driver.
      *
      * <p>No database work happens here — the driver performs schema setup for
      * every registered repository during {@link DatabaseDriver#connect()}, which
      * is why repositories are constructed before the driver connects.</p>
      *
-     * @param databaseDriver the driver to read, write and register through
+     * @param databaseDriver the driver to read and write through
      * @param entityType     the entity class
      * @param tableName      the table name
      * @throws IllegalArgumentException if the entity declares no constructor
      *                                  taking a {@link UUID}
+     * @see DatabaseApi#addRepository(EntityRepository)
      */
     public EntityRepository(final DatabaseDriver databaseDriver, final Class<Entity> entityType, final String tableName) {
         this.databaseDriver = databaseDriver;
@@ -113,7 +128,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
             throw new IllegalArgumentException("Class '%s' has no constructor taking a %s".formatted(entityType.getName(), UUID.class.getSimpleName()), e);
         }
 
-        databaseDriver.getRepositoryList().add(this);
+        DatabaseApi.addRepository(this);
     }
 
     /**

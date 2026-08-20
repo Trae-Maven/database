@@ -2,6 +2,7 @@ package io.github.trae.database.driver;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import io.github.trae.database.DatabaseApi;
 import io.github.trae.database.batch.BatchQueue;
 import io.github.trae.database.batch.BatchQueueSettings;
 import io.github.trae.database.repository.EntityRepository;
@@ -13,15 +14,12 @@ import org.jooq.SQLDialect;
 import org.jooq.conf.Settings;
 import org.jooq.impl.DSL;
 
-import java.util.ArrayList;
-import java.util.List;
-
 /**
  * Owns the PostgreSQL connection pool, the jOOQ context built over it, and the
  * batch queue every write passes through.
  *
- * <p>Repositories add themselves to {@code getRepositoryList()} as they are
- * constructed, so the driver knows the full schema before it opens anything.
+ * <p>Repositories add themselves to {@link DatabaseApi} as they are constructed,
+ * so the driver knows the full schema before it opens anything.
  * {@link #connect()} then does the whole startup sequence in order: open the
  * pool, build the context and queue, install the {@code pg_trgm} extension, and
  * bring every registered table and index up to date. Repositories are therefore
@@ -40,17 +38,11 @@ import java.util.List;
  *
  * @see BatchQueue
  * @see EntityRepository
+ * @see DatabaseApi
  */
 @CustomLog
 @RequiredArgsConstructor
 public abstract class DatabaseDriver implements Connector {
-
-    /**
-     * Every repository built against this driver, in construction order.
-     * Populated by {@link EntityRepository}'s constructor.
-     */
-    @Getter
-    private final List<EntityRepository<?>> repositoryList = new ArrayList<>();
 
     /**
      * Pool configuration, supplied by the consumer.
@@ -86,8 +78,8 @@ public abstract class DatabaseDriver implements Connector {
      * batch queue creation, {@code pg_trgm} installation, then
      * {@link EntityRepository#createTable()},
      * {@link EntityRepository#migrateSchema()} and
-     * {@link EntityRepository#createIndexes()} across every registered
-     * repository.</p>
+     * {@link EntityRepository#createIndexes()} across every repository held by
+     * {@link DatabaseApi}.</p>
      *
      * <p>The extension is installed before any index work because a
      * {@link io.github.trae.database.repository.enums.IndexType#GIN_TRGM} index
@@ -105,7 +97,7 @@ public abstract class DatabaseDriver implements Connector {
 
         this.dslContext.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
 
-        for (final EntityRepository<?> entityRepository : this.repositoryList) {
+        for (final EntityRepository<?> entityRepository : DatabaseApi.getRepositoryList()) {
             entityRepository.createTable();
             entityRepository.migrateSchema();
             entityRepository.createIndexes();

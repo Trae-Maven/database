@@ -180,7 +180,7 @@ public class AccountRepository extends EntityRepository<Account> {
 }
 ```
 
-The repository registers itself with the driver on construction. Build every repository first, then call `connect()` — that is when tables, columns and indexes are brought up to date.
+The repository registers itself with `DatabaseApi` on construction. Build every repository first, then call `connect()` — that is when tables, columns and indexes are brought up to date.
 
 ### 4. Add Cached Lookups
 
@@ -406,6 +406,7 @@ The commit threshold scales with the write count deliberately — a commit costs
 `ConcurrentHashMap`-backed, keyed by whatever the subclass indexes on.
 
 ```java
+@Component
 public class AccountIdLocalStorage extends LocalStorage<UUID, Account> {
 
     @Override
@@ -443,6 +444,7 @@ Entries expire by the storage's TTL, applied on write; reads do not extend it. T
 Lettuce-backed and shared across every instance pointing at the same Redis. Keys are prefixed with a namespace, and each namespace keeps its own Redis set of member keys — that index is what makes `keys()`, `values()` and `size()` possible without a `SCAN`.
 
 ```java
+@Component
 public class AccountIdRedisStorage extends RedisStorage<Account> {
 
     public AccountIdRedisStorage(final MyRedisDriver redisDriver) {
@@ -535,7 +537,7 @@ public class MyDatabaseDriver extends DatabaseDriver {
 }
 ```
 
-The driver, every repository and every manager are components — the container builds the graph, and each repository registers itself with the driver as it is constructed.
+The driver, every repository and every manager are components — the container builds the graph, and each repository registers itself with `DatabaseApi` as it is constructed.
 
 ```java
 @Repository
@@ -572,6 +574,18 @@ public class DatabaseInitializer {
 ```
 
 `connect()` opens the pool, builds the jOOQ context and batch queue, installs `pg_trgm`, then creates and migrates every registered repository's table and indexes. That ordering is why it runs after the container has constructed the repositories rather than as part of the driver's own construction.
+
+`DatabaseApi` is where that registry lives — static, because a repository needs somewhere to register at construction time, when the driver may not exist yet. It also exposes a readiness flag:
+
+```java
+accountRepository.setLoaded(true);
+
+if (DatabaseApi.isDatabaseLoaded()) {
+    // every repository has finished loading
+}
+```
+
+Nothing marks a repository loaded on its own — call `setLoaded(true)` once that entity's startup work is done, and gate on `isDatabaseLoaded()` before the application starts serving.
 
 Two pgjdbc properties are applied automatically:
 
@@ -646,6 +660,7 @@ Entity (Account)
     ↕ EntityRepository (schema, reads, write queueing)
     ↕ BatchQueue (coalescing, ordering, chunked transactions)
     ↕ DatabaseDriver (HikariCP pool + jOOQ context)
+    ↕ DatabaseApi (repository registry, consulted on connect)
 
 EntityHolder (AccountManager)
     ↕ LookupProvider (tier walk + request coalescing)
@@ -663,6 +678,7 @@ EntityHolder (AccountManager)
 | **PendingWrite** | One entity's queued write, merged in place as further writes arrive |
 | **BatchQueue** | Coalesces, orders, chunks and commits every deferred write |
 | **DatabaseDriver** | Owns the pool, jOOQ context and batch queue; runs schema setup on connect |
+| **DatabaseApi** | Static registry of every constructed repository, plus the readiness flag |
 | **RedisDriver** | Shared Lettuce connection, command helpers and pub/sub |
 | **Storage** | Unified key-value cache contract with TTL and `index`/`unIndex` |
 | **LocalStorage** | In-process cache with lazy eviction and a periodic sweep |
