@@ -343,7 +343,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * Queues a write of every column as an upsert.
      *
      * <p>For creating an entity, or for rewriting one wholesale. A partial change
-     * to an existing entity belongs in {@link #update(Entity, EntityProperty)}
+     * to an existing entity belongs in {@code update(Entity, EntityProperty)}
      * instead, which writes only what changed.</p>
      *
      * @param entity the entity to persist

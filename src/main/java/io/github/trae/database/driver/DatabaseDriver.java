@@ -20,7 +20,7 @@ import java.util.List;
  * Owns the PostgreSQL connection pool, the jOOQ context built over it, and the
  * batch queue every write passes through.
  *
- * <p>Repositories add themselves to {@link #getRepositoryList()} as they are
+ * <p>Repositories add themselves to {@code getRepositoryList()} as they are
  * constructed, so the driver knows the full schema before it opens anything.
  * {@link #connect()} then does the whole startup sequence in order: open the
  * pool, build the context and queue, install the {@code pg_trgm} extension, and
