@@ -1,327 +1,132 @@
 package io.github.trae.database.driver;
 
-import io.github.trae.database.filter.Filter;
-import io.github.trae.database.index.Index;
-import io.github.trae.database.query.QueryOptions;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+import io.github.trae.database.batch.BatchQueue;
+import io.github.trae.database.batch.BatchQueueSettings;
+import io.github.trae.database.repository.EntityRepository;
+import lombok.CustomLog;
+import lombok.Getter;
+import lombok.RequiredArgsConstructor;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.conf.Settings;
+import org.jooq.impl.DSL;
 
-import java.util.LinkedHashMap;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
-import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 
 /**
- * Backend-agnostic database driver interface.
+ * Owns the PostgreSQL connection pool, the jOOQ context built over it, and the
+ * batch queue every write passes through.
  *
- * <p>Defines the contract for all database operations — writes, reads (sync and async),
- * projected property reads, existence checks, counting, and index management. Each
- * supported database type (MongoDB, MySQL, etc.) provides its own implementation,
- * translating these generic operations into native driver calls.</p>
+ * <p>Repositories add themselves to {@link #getRepositoryList()} as they are
+ * constructed, so the driver knows the full schema before it opens anything.
+ * {@link #connect()} then does the whole startup sequence in order: open the
+ * pool, build the context and queue, install the {@code pg_trgm} extension, and
+ * bring every registered table and index up to date. Repositories are therefore
+ * constructed first and {@link #connect()} called afterwards.</p>
  *
- * <p>Write operations ({@link #save}, {@link #update}, {@link #delete}) are typically
- * routed through a {@link io.github.trae.database.batch.BatchQueue} by the
- * implementation for batched execution.</p>
+ * <p>Two pgjdbc properties are set unconditionally.
+ * {@code stringtype=unspecified} lets Postgres coerce string binds into
+ * {@code jsonb} columns rather than rejecting them, and
+ * {@code reWriteBatchedInserts=true} lets the driver fold a batch of identical
+ * inserts into one multi-row statement — which is exactly the shape
+ * {@link BatchQueue} produces.</p>
  *
- * <p>All read methods return data as {@link LinkedHashMap} instances (and, for the
- * property-projection methods, as plain {@link Object} values or maps thereof). Nested
- * structures — sub-documents and arrays — are recursively normalized to
- * {@link LinkedHashMap} and {@link List} so the shape is identical regardless of the
- * underlying backend, as required by
- * {@link io.github.trae.database.domain.data.DomainData} during deserialization.</p>
+ * <p>Abstract so a consumer subclasses it and annotates the subclass for their
+ * own dependency injection framework, keeping the library itself free of any
+ * framework's annotations.</p>
  *
- * <p>The repository layer interacts exclusively through this interface,
- * making the underlying database technology fully interchangeable.</p>
- *
- * @see io.github.trae.database.types.mongo.MongoDatabaseDriver
- * @see io.github.trae.database.types.mysql.MySqlDatabaseDriver
+ * @see BatchQueue
+ * @see EntityRepository
  */
-public interface DatabaseDriver extends Connector {
+@CustomLog
+@RequiredArgsConstructor
+public abstract class DatabaseDriver implements Connector {
 
     /**
-     * Persists a domain's data, upserting if the identifier already exists.
-     *
-     * <p>If a filter list is provided, the implementation uses it as the match
-     * condition for the upsert instead of the identifier. This enables compound
-     * key upserts (e.g. matching on {@code serverId + username} rather than
-     * {@code _id}).</p>
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param identifier     the domain's unique identifier ({@code _id})
-     * @param filterList     the filter conditions for matching, or empty/null to match on {@code _id}
-     * @param dataMap        the property name to value map to persist
+     * Every repository built against this driver, in construction order.
+     * Populated by {@link EntityRepository}'s constructor.
      */
-    void save(final String databaseName, final String collectionName, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap);
+    @Getter
+    private final List<EntityRepository<?>> repositoryList = new ArrayList<>();
 
     /**
-     * Updates specific fields on an existing document or row.
-     *
-     * <p>If a filter list is provided, the implementation uses it as the match
-     * condition for the update instead of the identifier.</p>
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param identifier     the domain's unique identifier ({@code _id})
-     * @param filterList     the filter conditions for matching, or empty/null to match on {@code _id}
-     * @param dataMap        the property name to value map of fields to update
+     * Pool configuration, supplied by the consumer.
      */
-    void update(final String databaseName, final String collectionName, final UUID identifier, final List<Filter> filterList, final LinkedHashMap<String, Object> dataMap);
+    private final HikariConfig hikariConfig;
 
     /**
-     * Deletes a document or row.
-     *
-     * <p>If a filter list is provided, the implementation uses it as the match
-     * condition for the deletion instead of the identifier.</p>
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param identifier     the domain's unique identifier ({@code _id})
-     * @param filterList     the filter conditions for matching, or empty/null to match on {@code _id}
+     * Tuning for the batch queue created during {@link #connect()}.
      */
-    void delete(final String databaseName, final String collectionName, final UUID identifier, final List<Filter> filterList);
+    private final BatchQueueSettings batchQueueSettings;
 
     /**
-     * Synchronously finds a single document or row by its identifier.
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param identifier     the domain's unique identifier ({@code _id})
-     * @return an {@link Optional} containing the raw data map, or empty if not found
+     * The connection pool, opened on {@link #connect()}.
      */
-    Optional<LinkedHashMap<String, Object>> findOneSynchronously(final String databaseName, final String collectionName, final UUID identifier);
+    private HikariDataSource dataSource;
 
     /**
-     * Synchronously finds a single document or row matching the given filters.
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param filters        the filter conditions to apply
-     * @return an {@link Optional} containing the raw data map, or empty if not found
+     * The jOOQ context every read runs through.
      */
-    Optional<LinkedHashMap<String, Object>> findOneSynchronously(final String databaseName, final String collectionName, final List<Filter> filters);
+    @Getter
+    private DSLContext dslContext;
 
     /**
-     * Synchronously finds a single document or row matching the given query options.
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param queryOptions   the query options including filters, sort, and skip
-     * @return an {@link Optional} containing the raw data map, or empty if not found
+     * The queue every write is deferred into.
      */
-    Optional<LinkedHashMap<String, Object>> findOneSynchronously(final String databaseName, final String collectionName, final QueryOptions queryOptions);
+    @Getter
+    private BatchQueue batchQueue;
 
     /**
-     * Synchronously finds all documents or rows matching the given filters.
+     * Opens the pool and brings the schema up to date.
      *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param filters        the filter conditions to apply
-     * @return a list of raw data maps, empty if no matches
+     * <p>Runs, in order: pgjdbc property setup, pool creation, jOOQ context and
+     * batch queue creation, {@code pg_trgm} installation, then
+     * {@link EntityRepository#createTable()},
+     * {@link EntityRepository#migrateSchema()} and
+     * {@link EntityRepository#createIndexes()} across every registered
+     * repository.</p>
+     *
+     * <p>The extension is installed before any index work because a
+     * {@link io.github.trae.database.repository.enums.IndexType#GIN_TRGM} index
+     * cannot be created without it.</p>
      */
-    List<LinkedHashMap<String, Object>> findManySynchronously(final String databaseName, final String collectionName, final List<Filter> filters);
+    @Override
+    public void connect() {
+        this.hikariConfig.addDataSourceProperty("stringtype", "unspecified");
+        this.hikariConfig.addDataSourceProperty("reWriteBatchedInserts", "true");
+
+        this.dataSource = new HikariDataSource(this.hikariConfig);
+
+        this.dslContext = DSL.using(this.dataSource, SQLDialect.POSTGRES, new Settings().withExecuteLogging(false).withRenderSchema(false));
+        this.batchQueue = new BatchQueue(this.dslContext, this.batchQueueSettings);
+
+        this.dslContext.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+
+        for (final EntityRepository<?> entityRepository : this.repositoryList) {
+            entityRepository.createTable();
+            entityRepository.migrateSchema();
+            entityRepository.createIndexes();
+        }
+    }
 
     /**
-     * Synchronously finds all documents or rows matching the given query options.
+     * Drains pending writes, then closes the pool.
      *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param queryOptions   the query options including filters, sort, limit, and skip
-     * @return a list of raw data maps, empty if no matches
+     * <p>Order matters — shutting the queue down first gives it a live pool to
+     * commit its final drain through. Closing the pool first would lose every
+     * queued write.</p>
      */
-    List<LinkedHashMap<String, Object>> findManySynchronously(final String databaseName, final String collectionName, final QueryOptions queryOptions);
+    @Override
+    public void disconnect() {
+        if (this.batchQueue != null) {
+            this.batchQueue.shutdown();
+        }
 
-    /**
-     * Asynchronously finds a single document or row by its identifier.
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param identifier     the domain's unique identifier ({@code _id})
-     * @return a future resolving to an {@link Optional} containing the raw data map
-     */
-    CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneAsynchronously(final String databaseName, final String collectionName, final UUID identifier);
-
-    /**
-     * Asynchronously finds a single document or row matching the given filters.
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param filters        the filter conditions to apply
-     * @return a future resolving to an {@link Optional} containing the raw data map
-     */
-    CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneAsynchronously(final String databaseName, final String collectionName, final List<Filter> filters);
-
-    /**
-     * Asynchronously finds a single document or row matching the given query options.
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param queryOptions   the query options including filters, sort, and skip
-     * @return a future resolving to an {@link Optional} containing the raw data map
-     */
-    CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneAsynchronously(final String databaseName, final String collectionName, final QueryOptions queryOptions);
-
-    /**
-     * Asynchronously finds all documents or rows matching the given filters.
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param filters        the filter conditions to apply
-     * @return a future resolving to a list of raw data maps
-     */
-    CompletableFuture<List<LinkedHashMap<String, Object>>> findManyAsynchronously(final String databaseName, final String collectionName, final List<Filter> filters);
-
-    /**
-     * Asynchronously finds all documents or rows matching the given query options.
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param queryOptions   the query options including filters, sort, limit, and skip
-     * @return a future resolving to a list of raw data maps
-     */
-    CompletableFuture<List<LinkedHashMap<String, Object>>> findManyAsynchronously(final String databaseName, final String collectionName, final QueryOptions queryOptions);
-
-    /**
-     * Synchronously reads a single projected property from one document or row by its identifier.
-     *
-     * <p>Only the named property is fetched — implementations project to that single
-     * field for a cheap, narrow read. Nested values are normalized to
-     * {@link LinkedHashMap} / {@link List}.</p>
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param identifier     the domain's unique identifier ({@code _id})
-     * @param propertyKey    the property to project and return
-     * @return an {@link Optional} containing the property value, or empty if the document or property is absent
-     */
-    Optional<Object> findOneByPropertySynchronously(final String databaseName, final String collectionName, final UUID identifier, final String propertyKey);
-
-    /**
-     * Asynchronously reads a single projected property from one document or row by its identifier.
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param identifier     the domain's unique identifier ({@code _id})
-     * @param propertyKey    the property to project and return
-     * @return a future resolving to an {@link Optional} containing the property value
-     */
-    CompletableFuture<Optional<Object>> findOneByPropertyAsynchronously(final String databaseName, final String collectionName, final UUID identifier, final String propertyKey);
-
-    /**
-     * Synchronously reads several projected properties from one document or row by its identifier.
-     *
-     * <p>Only the named properties are fetched. The returned map preserves the
-     * requested key order; missing properties map to {@code null}. Nested values
-     * are normalized to {@link LinkedHashMap} / {@link List}.</p>
-     *
-     * @param databaseName    the target database name
-     * @param collectionName  the target collection or table name
-     * @param identifier      the domain's unique identifier ({@code _id})
-     * @param propertyKeyList the properties to project and return
-     * @return an {@link Optional} containing a property-to-value map, or empty if the document is absent
-     */
-    Optional<LinkedHashMap<String, Object>> findOneByManyPropertySynchronously(final String databaseName, final String collectionName, final UUID identifier, final List<String> propertyKeyList);
-
-    /**
-     * Asynchronously reads several projected properties from one document or row by its identifier.
-     *
-     * @param databaseName    the target database name
-     * @param collectionName  the target collection or table name
-     * @param identifier      the domain's unique identifier ({@code _id})
-     * @param propertyKeyList the properties to project and return
-     * @return a future resolving to an {@link Optional} containing a property-to-value map
-     */
-    CompletableFuture<Optional<LinkedHashMap<String, Object>>> findOneByManyPropertyAsynchronously(final String databaseName, final String collectionName, final UUID identifier, final List<String> propertyKeyList);
-
-    /**
-     * Synchronously reads a single projected property from many documents or rows in one query.
-     *
-     * <p>Resolves all given identifiers in a single round trip, returning a map from
-     * each found identifier to its projected property value. Identifiers with no
-     * matching document are simply absent from the result. Nested values are
-     * normalized to {@link LinkedHashMap} / {@link List}.</p>
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param identifierList the identifiers to resolve
-     * @param propertyKey    the property to project and return for each
-     * @return a map from identifier to its property value, empty if none match or the input list is empty
-     */
-    LinkedHashMap<UUID, Object> findManyByOnePropertySynchronously(final String databaseName, final String collectionName, final List<UUID> identifierList, final String propertyKey);
-
-    /**
-     * Asynchronously reads a single projected property from many documents or rows in one query.
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param identifierList the identifiers to resolve
-     * @param propertyKey    the property to project and return for each
-     * @return a future resolving to a map from identifier to its property value
-     */
-    CompletableFuture<LinkedHashMap<UUID, Object>> findManyByOnePropertyAsynchronously(final String databaseName, final String collectionName, final List<UUID> identifierList, final String propertyKey);
-
-    /**
-     * Synchronously reads several projected properties from many documents or rows in one query.
-     *
-     * <p>Resolves all given identifiers in a single round trip, returning a map from
-     * each found identifier to a property-to-value map. Each inner map preserves the
-     * requested key order; missing properties map to {@code null}. Identifiers with no
-     * matching document are absent from the outer result. Nested values are normalized
-     * to {@link LinkedHashMap} / {@link List}.</p>
-     *
-     * @param databaseName    the target database name
-     * @param collectionName  the target collection or table name
-     * @param identifierList  the identifiers to resolve
-     * @param propertyKeyList the properties to project and return for each
-     * @return a map from identifier to its property-to-value map, empty if none match or the input list is empty
-     */
-    LinkedHashMap<UUID, LinkedHashMap<String, Object>> findManyByManyPropertySynchronously(final String databaseName, final String collectionName, final List<UUID> identifierList, final List<String> propertyKeyList);
-
-    /**
-     * Asynchronously reads several projected properties from many documents or rows in one query.
-     *
-     * @param databaseName    the target database name
-     * @param collectionName  the target collection or table name
-     * @param identifierList  the identifiers to resolve
-     * @param propertyKeyList the properties to project and return for each
-     * @return a future resolving to a map from identifier to its property-to-value map
-     */
-    CompletableFuture<LinkedHashMap<UUID, LinkedHashMap<String, Object>>> findManyByManyPropertyAsynchronously(final String databaseName, final String collectionName, final List<UUID> identifierList, final List<String> propertyKeyList);
-
-    /**
-     * Checks whether a document or row with the given identifier exists.
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param identifier     the domain's unique identifier ({@code _id})
-     * @return {@code true} if the identifier exists in the collection
-     */
-    boolean exists(final String databaseName, final String collectionName, final UUID identifier);
-
-    /**
-     * Returns the total number of documents or rows in the collection.
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @return the document or row count
-     */
-    long count(final String databaseName, final String collectionName);
-
-    /**
-     * Returns the number of documents or rows matching the given filters.
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param filters        the filter conditions to apply
-     * @return the matching document or row count
-     */
-    long count(final String databaseName, final String collectionName, final List<Filter> filters);
-
-    /**
-     * Creates an index on the target collection or table.
-     *
-     * @param databaseName   the target database name
-     * @param collectionName the target collection or table name
-     * @param index          the index definition including fields, direction, and uniqueness
-     */
-    void createIndex(final String databaseName, final String collectionName, final Index index);
+        if (this.dataSource != null) {
+            this.dataSource.close();
+        }
+    }
 }

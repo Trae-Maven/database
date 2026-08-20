@@ -1,330 +1,256 @@
 package io.github.trae.database.storage;
 
-import io.github.trae.database.storage.cache.Cache;
-import io.github.trae.database.storage.interfaces.ILocalStorage;
-import io.github.trae.database.storage.interfaces.Storage;
-import io.github.trae.utilities.UtilTime;
+import io.github.trae.database.storage.data.CacheEntry;
+import io.github.trae.utilities.UtilString;
 
-import java.time.Duration;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Predicate;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 /**
- * {@link ConcurrentHashMap}-backed in-memory implementation of {@link Storage}
- * with per-key TTL and per-entry expiration-predicate support.
+ * In-process cache tier, backed by a {@link ConcurrentHashMap} of keys to
+ * expiring entries.
  *
- * <p>Each entry is wrapped in a {@link Cache} object that tracks its creation
- * time, optional TTL duration, and optional expiration predicate. An entry is
- * considered valid only while it has not exceeded its TTL and its predicate
- * (if any) does not test {@code true}. Expiry is enforced in two ways:</p>
- * <ul>
- *     <li><b>Lazy eviction</b> — on every {@link #get} call, if the requested
- *     entry is no longer valid it is removed and {@link Optional#empty()} is returned.</li>
- *     <li><b>Batched background sweep</b> — triggered on {@link #get} calls at most
- *     once per minute <em>per instance</em>, removing up to
- *     {@value #EVICTION_BATCH_SIZE} invalid entries per pass to prevent memory
- *     buildup without causing lag spikes. Entry into a sweep is gated by a
- *     compare-and-set so only a single thread sweeps per interval; concurrent
- *     callers skip the sweep and proceed directly to their lookup.</li>
- * </ul>
+ * <p>The fastest of the three tiers and the first one a lookup consults. Entries
+ * expire by the time-to-live returned from {@link #getTTL()}, applied when a
+ * value is written; reads do not extend it.</p>
  *
- * <p>The eviction clock is held per instance, so each storage sweeps on its own
- * independent cadence rather than sharing a single clock across all storages.</p>
+ * <p>There is no background sweeper. Expired entries are dropped when read, and
+ * a full sweep runs every {@value #CLEANUP_THRESHOLD} operations, so an entry
+ * nobody asks for in a quiet storage still gets collected eventually without a
+ * scheduler.</p>
  *
- * <p>Read methods ({@link #getKeys}, {@link #getValues}, {@link #getSize}) filter
- * out invalid entries from their results.</p>
+ * <p>Subclasses supply {@link #index(Object)} and {@link #unIndex(Object)} to
+ * decide the key an entity is stored under, and may override
+ * {@link #resolveKey(Object)} to normalise keys — uppercasing a name, trimming
+ * a code — so lookups match regardless of the caller's casing.</p>
  *
- * @param <Key>   the key type
- * @param <Value> the value type
- * @see Storage
- * @see Cache
+ * @param <Key>   the key type entries are stored under
+ * @param <Value> the cached value type
  */
-public abstract class LocalStorage<Key, Value> implements ILocalStorage<Key, Value> {
+public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
 
     /**
-     * Maximum number of invalid entries removed per eviction pass.
+     * How many operations pass between full expiry sweeps.
      */
-    private static final int EVICTION_BATCH_SIZE = 10_000;
+    private static final int CLEANUP_THRESHOLD = 100;
 
     /**
-     * Minimum interval between eviction sweeps in milliseconds.
+     * The backing entries, keyed by resolved key.
      */
-    private static final long EVICTION_INTERVAL = Duration.ofMinutes(1).toMillis();
+    private final ConcurrentHashMap<Key, CacheEntry<Value>> map = new ConcurrentHashMap<>();
 
     /**
-     * Timestamp of the last eviction sweep for this instance. Held per instance
-     * so each storage sweeps independently, and gated via compare-and-set so only
-     * one thread enters a sweep per interval.
+     * Counts operations since the last sweep, wrapping at
+     * {@link #CLEANUP_THRESHOLD}.
      */
-    private final AtomicLong lastEviction = new AtomicLong(System.currentTimeMillis());
-
-    private final ConcurrentHashMap<Key, Cache<Value>> map = new ConcurrentHashMap<>();
+    private final AtomicInteger operationsSinceCleanup = new AtomicInteger();
 
     /**
-     * Stores a value with the given TTL and validity predicate. A {@code null} TTL creates a
-     * non-expiring entry; a {@code null} predicate imposes no extra expiration condition.
+     * {@inheritDoc}
      *
-     * @param key       the key to store under
-     * @param value     the value to store
-     * @param ttl       the time-to-live duration, or {@code null} for permanent
-     * @param predicate the expiration predicate; when it tests {@code true} the entry is treated as expired, or {@code null} for none
-     */
-    @Override
-    public void put(final Key key, final Value value, final Duration ttl, final Predicate<Value> predicate) {
-        if (key == null) {
-            throw new IllegalArgumentException("Key cannot be null.");
-        }
-
-        this.map.put(key, new Cache<>(value, ttl, predicate));
-    }
-
-    /**
-     * Stores a value with the given TTL and no validity predicate. A {@code null} TTL creates a
-     * permanent entry.
-     *
-     * @param key   the key to store under
-     * @param value the value to store
-     * @param ttl   the time-to-live duration, or {@code null} for permanent
-     */
-    @Override
-    public void put(final Key key, final Value value, final Duration ttl) {
-        this.put(key, value, ttl, null);
-    }
-
-    /**
-     * Stores a value with no TTL, expired when the given predicate tests {@code true}.
-     *
-     * @param key       the key to store under
-     * @param value     the value to store
-     * @param predicate the expiration predicate; when it tests {@code true} the entry is treated as expired, or {@code null} for none
-     */
-    @Override
-    public void put(final Key key, final Value value, final Predicate<Value> predicate) {
-        this.put(key, value, null, predicate);
-    }
-
-    /**
-     * Stores a permanent value with no validity predicate.
-     *
-     * @param key   the key to store under
-     * @param value the value to store
+     * <p>Invalid keys and null values are ignored. The entry's expiry is set from
+     * {@link #getTTL()} at write time.</p>
      */
     @Override
     public void put(final Key key, final Value value) {
-        this.put(key, value, null, null);
+        this.cleanupIfNecessary();
+
+        final Key resolvedValidKey = this.resolveValidKey(key);
+        if (resolvedValidKey == null) {
+            return;
+        }
+
+        if (value == null) {
+            return;
+        }
+
+        this.map.put(resolvedValidKey, CacheEntry.of(value, this.getTTL()));
     }
 
     /**
-     * Removes the entry for the given key.
-     *
-     * @param key the key to remove
+     * {@inheritDoc}
      */
     @Override
     public void remove(final Key key) {
-        if (key == null) {
-            throw new IllegalArgumentException("Key cannot be null.");
+        this.cleanupIfNecessary();
+
+        final Key resolvedValidKey = this.resolveValidKey(key);
+        if (resolvedValidKey == null) {
+            return;
         }
 
-        this.map.remove(key);
+        this.map.remove(resolvedValidKey);
     }
 
     /**
-     * Replaces an entry under a new key. Removes the previous key first, then stores the value
-     * under the new key with the given TTL and predicate if both key and value are non-null.
+     * {@inheritDoc}
      *
-     * @param previousKey the old key to remove
-     * @param key         the new key to store under
-     * @param value       the value to store
-     * @param ttl         the time-to-live duration, or {@code null} for permanent
-     * @param predicate   the validity predicate tested on the value, or {@code null} for none
-     */
-    @Override
-    public void update(final Key previousKey, final Key key, final Value value, final Duration ttl, final Predicate<Value> predicate) {
-        if (previousKey == null) {
-            throw new IllegalArgumentException("Previous Key cannot be null.");
-        }
-
-        this.remove(previousKey);
-
-        if (key != null && value != null) {
-            this.put(key, value, ttl, predicate);
-        }
-    }
-
-    /**
-     * Replaces an entry under a new key with the given TTL and no validity predicate.
-     *
-     * @param previousKey the old key to remove
-     * @param key         the new key to store under
-     * @param value       the value to store
-     * @param ttl         the time-to-live duration, or {@code null} for permanent
-     */
-    @Override
-    public void update(final Key previousKey, final Key key, final Value value, final Duration ttl) {
-        this.update(previousKey, key, value, ttl, null);
-    }
-
-    /**
-     * Replaces an entry under a new key with no TTL, expired when the given predicate tests {@code true}.
-     *
-     * @param previousKey the old key to remove
-     * @param key         the new key to store under
-     * @param value       the value to store
-     * @param predicate   the validity predicate tested on the value, or {@code null} for none
-     */
-    @Override
-    public void update(final Key previousKey, final Key key, final Value value, final Predicate<Value> predicate) {
-        this.update(previousKey, key, value, null, predicate);
-    }
-
-    /**
-     * Replaces an entry under a new key as a permanent value with no validity predicate.
-     *
-     * @param previousKey the old key to remove
-     * @param key         the new key to store under
-     * @param value       the value to store
-     */
-    @Override
-    public void update(final Key previousKey, final Key key, final Value value) {
-        this.update(previousKey, key, value, null, null);
-    }
-
-    /**
-     * Retrieves the value for the given key if it exists and is still valid.
-     *
-     * <p>Before performing the lookup, attempts a batched eviction sweep if the
-     * eviction interval has elapsed for this instance. Entry is gated by a
-     * compare-and-set on the eviction timestamp, so only a single thread sweeps
-     * per interval while concurrent callers proceed straight to their lookup. The
-     * winning thread removes up to {@value #EVICTION_BATCH_SIZE} invalid entries.</p>
-     *
-     * <p>If the requested entry itself is no longer valid, it is lazily removed and
-     * {@link Optional#empty()} is returned.</p>
-     *
-     * @param key the key to look up
-     * @return the value if present and valid, otherwise empty
+     * <p>An expired entry is removed as it is found, so the next read skips it
+     * without waiting for a sweep.</p>
      */
     @Override
     public Optional<Value> get(final Key key) {
-        if (key == null) {
+        this.cleanupIfNecessary();
+
+        final Key resolvedValidKey = this.resolveValidKey(key);
+        if (resolvedValidKey == null) {
             return Optional.empty();
         }
 
-        this.sweep();
-
-        final Cache<Value> cache = this.map.get(key);
-        if (cache != null) {
-            if (cache.isValid()) {
-                return Optional.of(cache.getValue());
-            }
-
-            this.map.remove(key);
+        final CacheEntry<Value> cacheEntry = this.map.get(resolvedValidKey);
+        if (cacheEntry == null) {
+            return Optional.empty();
         }
 
-        return Optional.empty();
+        if (cacheEntry.isExpired()) {
+            this.map.remove(resolvedValidKey, cacheEntry);
+            return Optional.empty();
+        }
+
+        return Optional.of(cacheEntry.getValue());
     }
 
     /**
-     * Checks whether a valid entry exists for the given key.
-     *
-     * @param key the key to check
-     * @return {@code true} if the key maps to a valid entry
+     * {@inheritDoc}
      */
     @Override
     public boolean contains(final Key key) {
-        if (key == null) {
-            throw new IllegalArgumentException("Key cannot be null.");
+        this.cleanupIfNecessary();
+
+        final Key resolvedValidKey = this.resolveValidKey(key);
+        if (resolvedValidKey == null) {
+            return false;
         }
 
-        return this.get(key).isPresent();
+        final CacheEntry<Value> cacheEntry = this.map.get(resolvedValidKey);
+        if (cacheEntry == null) {
+            return false;
+        }
+
+        if (cacheEntry.isExpired()) {
+            this.map.remove(resolvedValidKey, cacheEntry);
+            return false;
+        }
+
+        return true;
     }
 
     /**
-     * Removes all entries from the storage.
+     * {@inheritDoc}
      */
     @Override
-    public void flush() {
+    public Set<Key> keys() {
+        return this.map.entrySet().stream().filter(entry -> !entry.getValue().isExpired()).map(Map.Entry::getKey).collect(Collectors.toUnmodifiableSet());
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public List<Value> values() {
+        return this.map.values().stream().filter(value -> !value.isExpired()).map(CacheEntry::getValue).toList();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public long size() {
+        return this.map.values().stream().filter(value -> !value.isExpired()).count();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void clear() {
         this.map.clear();
     }
 
     /**
-     * Returns all keys that map to valid entries.
+     * {@inheritDoc}
      *
-     * @return an immutable list of valid keys
+     * <p>Used when the value a storage keys on changes — an account's email being
+     * updated, say. Without it the entity stays reachable under the stale key
+     * until the entry expires, so a lookup by the old email keeps resolving.</p>
+     *
+     * <p>The entity must already hold its new value; the previous key is passed
+     * in because it can no longer be derived from the entity.</p>
      */
     @Override
-    public List<Key> getKeys() {
-        return this.map.entrySet().stream().filter(entry -> entry.getValue().isValid()).map(Map.Entry::getKey).toList();
+    public void reIndex(final Value value, final Key previousKey) {
+        this.remove(previousKey);
+        this.index(value);
     }
 
     /**
-     * Returns all values from valid entries.
+     * Removes every expired entry in one pass.
      *
-     * @return an immutable list of valid values
+     * <p>Runs automatically every {@value #CLEANUP_THRESHOLD} operations, and can
+     * be called directly to reclaim memory sooner.</p>
      */
-    @Override
-    public List<Value> getValues() {
-        return this.map.values().stream().filter(Cache::isValid).map(Cache::getValue).toList();
+    public void cleanup() {
+        this.map.entrySet().removeIf(entry -> entry.getValue().isExpired());
     }
 
     /**
-     * Returns the count of valid entries.
+     * Normalises a key before it is used.
      *
-     * @return the number of valid entries
+     * <p>Returns the key unchanged by default. Override to make lookups
+     * case-insensitive or otherwise forgiving.</p>
+     *
+     * @param key the key as supplied
+     * @return the key to actually store or look up under
      */
-    @Override
-    public int getSize() {
-        return (int) this.map.values().stream().filter(Cache::isValid).count();
+    public Key resolveKey(final Key key) {
+        return key;
     }
 
     /**
-     * Checks whether the storage contains any valid entries.
+     * Validates a key, resolves it, then validates the result.
      *
-     * @return {@code true} if no valid entries exist
+     * <p>Checking both sides catches a {@link #resolveKey(Object)} override that
+     * turns a usable key into an empty one.</p>
+     *
+     * @param key the key as supplied
+     * @return the resolved key, or {@code null} if either form is unusable
      */
-    @Override
-    public boolean isEmpty() {
-        return this.getSize() <= 0;
-    }
-
-    /**
-     * Performs a batched eviction sweep if the interval has elapsed and this
-     * thread wins the compare-and-set claiming the interval. Removes up to
-     * {@value #EVICTION_BATCH_SIZE} invalid entries in a single pass. If the
-     * batch limit is reached, the timestamp is rewound so the next {@link #get}
-     * call can immediately continue sweeping the remaining invalid entries.
-     */
-    private void sweep() {
-        final long last = this.lastEviction.get();
-
-        if (!(UtilTime.elapsed(last, EVICTION_INTERVAL))) {
-            return;
+    private Key resolveValidKey(final Key key) {
+        if (!this.isValidKey(key)) {
+            return null;
         }
 
-        final long now = System.currentTimeMillis();
+        final Key resolvedKey = this.resolveKey(key);
 
-        if (!(this.lastEviction.compareAndSet(last, now))) {
-            return;
+        return this.isValidKey(resolvedKey) ? resolvedKey : null;
+    }
+
+    /**
+     * Returns whether a key is usable — non-null, and non-blank if it is a
+     * string.
+     *
+     * @param key the key to check
+     * @return {@code true} if the key can be stored or looked up
+     */
+    private boolean isValidKey(final Key key) {
+        if (key == null) {
+            return false;
         }
 
-        int count = 0;
+        return !(key instanceof final String keyString && UtilString.isEmpty(keyString));
+    }
 
-        final Iterator<Cache<Value>> iterator = this.map.values().iterator();
-
-        while (iterator.hasNext() && count < EVICTION_BATCH_SIZE) {
-            if (!(iterator.next().isValid())) {
-                iterator.remove();
-                count++;
-            }
-        }
-
-        if (count >= EVICTION_BATCH_SIZE) {
-            this.lastEviction.set(last);
+    /**
+     * Runs a full sweep once every {@value #CLEANUP_THRESHOLD} operations.
+     */
+    private void cleanupIfNecessary() {
+        if (this.operationsSinceCleanup.updateAndGet(count -> (count + 1) % CLEANUP_THRESHOLD) == 0) {
+            this.cleanup();
         }
     }
 }

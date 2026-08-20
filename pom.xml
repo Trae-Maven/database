@@ -10,7 +10,7 @@
 
     <name>Database</name>
 
-    <description>A unified database abstraction layer providing property-enum-driven domain mapping, repository-based CRUD operations, local and distributed key-value storage with per-key TTL, and multi-backend support for MongoDB, MySQL, and Redis.</description>
+    <description>A PostgreSQL data-access library built on jOOQ, with declarative property mapping, deferred batched writes, and tiered local, Redis and database lookups with request coalescing.</description>
 
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
@@ -47,30 +47,35 @@
             <version>0.0.1</version>
         </dependency>
 
-        <!-- Mongo -->
+        <!-- GSON -->
         <dependency>
-            <groupId>org.mongodb</groupId>
-            <artifactId>mongodb-driver-sync</artifactId>
-            <version>5.7.0</version>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.14.0</version>
         </dependency>
 
-        <!-- MySQL -->
+        <!-- SQL -->
+        <dependency>
+            <groupId>org.jooq</groupId>
+            <artifactId>jooq</artifactId>
+            <version>3.20.5</version>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.5</version>
+        </dependency>
         <dependency>
             <groupId>com.zaxxer</groupId>
             <artifactId>HikariCP</artifactId>
             <version>7.0.2</version>
         </dependency>
-        <dependency>
-            <groupId>com.mysql</groupId>
-            <artifactId>mysql-connector-j</artifactId>
-            <version>9.7.0</version>
-        </dependency>
 
         <!-- Redis -->
         <dependency>
-            <groupId>redis.clients</groupId>
-            <artifactId>jedis</artifactId>
-            <version>7.5.0</version>
+            <groupId>io.lettuce</groupId>
+            <artifactId>lettuce-core</artifactId>
+            <version>7.0.0.RELEASE</version>
         </dependency>
     </dependencies>
 

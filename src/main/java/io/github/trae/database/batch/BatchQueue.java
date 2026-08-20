@@ -1,259 +1,303 @@
 package io.github.trae.database.batch;
 
-import io.github.trae.database.batch.interfaces.IBatchQueue;
+import io.github.trae.database.batch.data.PendingWrite;
+import io.github.trae.database.batch.enums.OperationType;
+import lombok.CustomLog;
+import org.jooq.BatchBindStep;
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.Query;
+import org.jooq.conf.ParamType;
+import org.jooq.impl.DSL;
 
-import java.time.Duration;
-import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.Consumer;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Generic asynchronous batch queue for grouping and flushing operations.
+ * Defers every write, coalesces writes to the same entity, and commits them in
+ * batched transactions on its own thread.
  *
- * <p>Collects items of type {@code T} and periodically flushes them as a single
- * batch to the provided {@link Consumer}. This enables bulk execution — for example,
- * the MongoDB driver collects {@code WriteModel} instances and flushes them as a
- * single {@code bulkWrite} call.</p>
+ * <p>Nothing reaches the database at the moment a repository saves, updates or
+ * deletes. Writes land in a map keyed by table and identifier, so a burst of
+ * edits to one entity collapses into a single statement rather than one per
+ * call. A scheduled thread drains that map on a fixed interval.</p>
  *
- * <p>Supports two modes based on the {@code period} parameter:</p>
- * <ul>
- *     <li><strong>Instant</strong> ({@link Duration#ZERO}) — flushes immediately on every {@link #add}</li>
- *     <li><strong>Batched</strong> — flushes when the queue reaches {@code batchSize} or on the scheduled interval</li>
- * </ul>
+ * <p>Each drain sorts by arrival order, splits into chunks, and commits each
+ * chunk in one transaction. Within a transaction, runs of statements sharing
+ * identical SQL are executed as a single JDBC batch — combined with pgjdbc's
+ * insert rewriting, a chunk of inserts against one table becomes one round
+ * trip. Sorting by sequence keeps cross-entity ordering intact, so a row is
+ * never deleted before the insert that created it.</p>
  *
- * <p>Thread safety is provided by a {@link ReentrantLock} guarding all queue access.
- * Flush execution is dispatched to a single-threaded executor with a daemon thread,
- * so batches are processed strictly in the order they are drained — batch N completes
- * before batch N+1 begins. This preserves write ordering for non-commutative operations
- * on the same document across separate batches, and provides natural backpressure under
- * sustained load.</p>
+ * <p>A chunk that fails is logged and skipped; the rest of the flush continues.
+ * Writes in a failed chunk are lost, having already left the map.</p>
  *
- * <p>On {@link #shutdown()}, the scheduler is stopped and awaited, remaining items are
- * flushed synchronously on the calling thread, and the executor awaits termination for
- * up to 30 seconds before forcing shutdown.</p>
+ * <p>{@link #shutdown()} stops the scheduler and performs one final drain, and is
+ * registered as a JVM shutdown hook so an abrupt exit still flushes.</p>
  *
- * @param <T> the type of operation to batch
- * @see IBatchQueue
+ * @see PendingWrite
+ * @see BatchQueueSettings
  */
-public class BatchQueue<T> implements IBatchQueue<T> {
-
-    private static final Logger LOGGER = Logger.getLogger(BatchQueue.class.getName());
-
-    private final List<T> queue = new ArrayList<>();
-    private final ReentrantLock lock = new ReentrantLock();
-    private final AtomicBoolean shutdown = new AtomicBoolean(false);
-
-    private final Consumer<List<T>> flushConsumer;
-    private final ExecutorService executorService;
-    private final int batchSize;
-    private final boolean instant;
-
-    private ScheduledExecutorService scheduledExecutorService;
+@CustomLog
+public class BatchQueue {
 
     /**
-     * Creates a new batch queue.
-     *
-     * @param batchSize     the maximum number of items before an automatic flush is triggered
-     * @param period        the flush interval; {@link Duration#ZERO} for instant mode
-     * @param flushConsumer the consumer that receives the entire batch for processing
+     * The context every commit runs through.
      */
-    public BatchQueue(final int batchSize, final Duration period, final Consumer<List<T>> flushConsumer) {
-        this.batchSize = batchSize;
-        this.instant = period.isZero();
-        this.flushConsumer = flushConsumer;
+    private final DSLContext dslContext;
 
-        this.executorService = Executors.newSingleThreadExecutor(
-                runnable -> {
-                    final Thread thread = new Thread(runnable, "batch-queue-worker");
-                    thread.setDaemon(true);
-                    return thread;
-                }
-        );
+    /**
+     * Pending writes by {@code table:id}. One entry per entity, merged in place.
+     */
+    private final ConcurrentHashMap<String, PendingWrite> pendingWriteMap = new ConcurrentHashMap<>();
 
-        if (!(this.instant)) {
-            this.scheduledExecutorService = Executors.newSingleThreadScheduledExecutor(runnable -> {
-                final Thread thread = new Thread(runnable, "batch-queue-scheduler");
-                thread.setDaemon(true);
-                return thread;
-            });
+    /**
+     * Stamps arrival order onto each newly queued entity.
+     */
+    private final AtomicLong sequence = new AtomicLong();
 
-            this.scheduledExecutorService.scheduleAtFixedRate(this::flush, period.toMillis(), period.toMillis(), TimeUnit.MILLISECONDS);
+    /**
+     * Set once shutdown begins, rejecting further writes and making a second
+     * shutdown a no-op.
+     */
+    private final AtomicBoolean shutdown = new AtomicBoolean();
+
+    /**
+     * Serialises flushes, so a manual {@link #flush()} and the scheduled drain
+     * cannot commit concurrently.
+     */
+    private final Object flushLock = new Object();
+
+    /**
+     * The single daemon thread running scheduled drains.
+     */
+    private final ScheduledExecutorService scheduledExecutorService;
+
+    /**
+     * Interval, chunk size and warning thresholds.
+     */
+    private final BatchQueueSettings batchQueueSettings;
+
+    /**
+     * Starts the flush scheduler and registers the shutdown hook.
+     *
+     * @param dslContext         the context to commit through
+     * @param batchQueueSettings the tuning to apply
+     * @throws IllegalArgumentException if the flush interval or chunk size is
+     *                                  below one
+     */
+    public BatchQueue(final DSLContext dslContext, final BatchQueueSettings batchQueueSettings) {
+        if (batchQueueSettings.getFlushIntervalMillis() < 1L) {
+            throw new IllegalArgumentException("Flush interval must be at least 1ms.");
         }
+
+        if (batchQueueSettings.getChunkSize() < 1) {
+            throw new IllegalArgumentException("Chunk size must be at least 1.");
+        }
+
+        this.dslContext = dslContext;
+        this.batchQueueSettings = batchQueueSettings;
+
+        this.scheduledExecutorService = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            final Thread thread = new Thread(runnable, "batch-queue");
+            thread.setDaemon(true);
+            return thread;
+        });
+
+        this.scheduledExecutorService.scheduleWithFixedDelay(this::drain, batchQueueSettings.getFlushIntervalMillis(), batchQueueSettings.getFlushIntervalMillis(), TimeUnit.MILLISECONDS);
+
+        Runtime.getRuntime().addShutdownHook(new Thread(this::shutdown, "batch-queue-shutdown"));
     }
 
     /**
-     * Adds an operation to the queue.
+     * Returns whether this queue has been shut down.
      *
-     * <p>In instant mode, triggers an immediate flush. In batched mode,
-     * triggers a flush when the queue size reaches the configured batch size.
-     * Rejects operations after {@link #shutdown()} has been called.</p>
-     *
-     * @param operation the operation to enqueue
+     * @return {@code true} once shutdown has begun
      */
-    @Override
-    public void add(final T operation) {
+    public boolean isShutdown() {
+        return this.shutdown.get();
+    }
+
+    /**
+     * Returns how many entities currently have a write waiting.
+     *
+     * <p>Counts entities rather than calls, since writes to one entity are merged
+     * into a single pending entry.</p>
+     *
+     * @return the pending entity count
+     */
+    public int getPendingWriteCount() {
+        return this.pendingWriteMap.size();
+    }
+
+    /**
+     * Queues a write, merging it into any pending write for the same entity.
+     *
+     * @param table           the table being written to
+     * @param identifierField the identifier column
+     * @param identifierValue the entity's identifier
+     * @param valueMap        the columns to write, empty for a delete
+     * @param operationType   the kind of statement to render
+     * @throws IllegalStateException if the queue has been shut down
+     */
+    public void queue(final String table, final Field<UUID> identifierField, final UUID identifierValue, final Map<Field<?>, Object> valueMap, final OperationType operationType) {
         if (this.shutdown.get()) {
-            LOGGER.warning("BatchQueue is shut down, rejecting operation");
-            return;
+            throw new IllegalStateException("BatchQueue has been shut down.");
         }
 
-        this.lock.lock();
-        try {
-            this.queue.add(operation);
+        final String key = "%s:%s".formatted(table, identifierValue);
 
-            if (this.instant || this.queue.size() >= this.batchSize) {
-                this.drainAndExecute();
-            }
-        } finally {
-            this.lock.unlock();
-        }
+        this.pendingWriteMap.merge(key, new PendingWrite(table, key, this.sequence.incrementAndGet(), identifierField, identifierValue, valueMap, operationType), PendingWrite::merge);
     }
 
     /**
-     * Manually triggers a flush of all currently queued operations.
+     * Commits every pending write, in arrival order, in chunked transactions.
      *
-     * <p>The batch is drained and dispatched to the executor for async processing.
-     * Also called automatically by the scheduled executor in batched mode. Has no
-     * effect once {@link #shutdown()} has been called, since shutdown performs its
-     * own final flush and the executor is no longer accepting tasks.</p>
+     * <p>Claims writes by removing them from the map, so a write queued mid-flush
+     * is left for the next one rather than lost or committed twice. A chunk that
+     * throws is logged and skipped; later chunks still commit.</p>
      */
-    @Override
     public void flush() {
-        if (this.shutdown.get()) {
+        if (this.pendingWriteMap.isEmpty()) {
             return;
         }
 
-        this.lock.lock();
-        try {
-            this.drainAndExecute();
-        } finally {
-            this.lock.unlock();
-        }
-    }
+        synchronized (this.flushLock) {
+            final List<PendingWrite> pendingWriteList = this.pendingWriteMap.values().stream()
+                    .filter(pendingWrite -> this.pendingWriteMap.remove(pendingWrite.getKey(), pendingWrite))
+                    .sorted(Comparator.comparingLong(PendingWrite::getSequence))
+                    .toList();
 
-    /**
-     * Gracefully shuts down the batch queue.
-     *
-     * <p>Execution order:</p>
-     * <ol>
-     *     <li>Stops the scheduled executor and awaits its termination, so no scheduled
-     *     flush can run concurrently with the final flush below</li>
-     *     <li>Drains remaining items and flushes them synchronously on the calling thread</li>
-     *     <li>Shuts down the worker executor and awaits termination for up to 30 seconds</li>
-     *     <li>Forces shutdown if termination times out</li>
-     * </ol>
-     *
-     * <p>Idempotent — subsequent calls are no-ops.</p>
-     */
-    @Override
-    public void shutdown() {
-        if (!(this.shutdown.compareAndSet(false, true))) {
-            return;
-        }
-
-        if (this.scheduledExecutorService != null) {
-            this.scheduledExecutorService.shutdown();
-
-            try {
-                if (!(this.scheduledExecutorService.awaitTermination(5, TimeUnit.SECONDS))) {
-                    this.scheduledExecutorService.shutdownNow();
-                }
-            } catch (final InterruptedException e) {
-                this.scheduledExecutorService.shutdownNow();
-                Thread.currentThread().interrupt();
-            }
-        }
-
-        // Final synchronous flush on calling thread
-        this.lock.lock();
-        try {
-            if (!(this.queue.isEmpty())) {
-                final List<T> remaining = new ArrayList<>(this.queue);
-                this.queue.clear();
+            for (int index = 0; index < pendingWriteList.size(); index += this.batchQueueSettings.getChunkSize()) {
+                final List<PendingWrite> chunk = pendingWriteList.subList(index, Math.min(index + this.batchQueueSettings.getChunkSize(), pendingWriteList.size()));
 
                 try {
-                    this.flushConsumer.accept(remaining);
-                } catch (final Exception e) {
-                    LOGGER.log(Level.SEVERE, "BatchQueue final flush failed", e);
+                    this.commit(chunk);
+                } catch (final Throwable throwable) {
+                    LOGGER.error("Failed to commit {} write(s), starting at [{}].", chunk.size(), chunk.getFirst().getKey(), throwable);
                 }
             }
-        } finally {
-            this.lock.unlock();
+        }
+    }
+
+    /**
+     * Runs a flush, swallowing anything thrown.
+     *
+     * <p>An exception escaping a scheduled task cancels all future runs, which
+     * would silently stop the queue forever — hence catching {@link Throwable}
+     * rather than letting it propagate.</p>
+     */
+    private void drain() {
+        try {
+            this.flush();
+        } catch (final Throwable throwable) {
+            LOGGER.error("Failed to flush the batch queue.", throwable);
+        }
+    }
+
+    /**
+     * Commits one chunk in a single transaction, batching runs of identical SQL.
+     *
+     * <p>Statements are rendered with indexed parameters so two writes of the same
+     * shape produce the same SQL string regardless of their values, which is what
+     * makes them groupable.</p>
+     *
+     * @param pendingWriteList the writes to commit, in arrival order
+     */
+    private void commit(final List<PendingWrite> pendingWriteList) {
+        final long start = System.nanoTime();
+
+        this.dslContext.transaction(configuration -> {
+            final DSLContext transactionalDslContext = DSL.using(configuration);
+            final List<Query> queryList = pendingWriteList.stream().map(pendingWrite -> pendingWrite.toQuery(transactionalDslContext)).toList();
+            final List<String> sqlList = queryList.stream().map(query -> query.getSQL(ParamType.INDEXED)).toList();
+
+            int index = 0;
+
+            while (index < queryList.size()) {
+                int end = index + 1;
+
+                while (end < queryList.size() && sqlList.get(end).equals(sqlList.get(index))) {
+                    end++;
+                }
+
+                this.execute(transactionalDslContext, queryList.subList(index, end), pendingWriteList.get(index).getTable());
+
+                index = end;
+            }
+        });
+
+        final long duration = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+        if (duration > this.batchQueueSettings.getCommitWarnBaseMillis() + (pendingWriteList.size() * this.batchQueueSettings.getCommitWarnPerWriteMillis())) {
+            LOGGER.warn("Took {}ms to commit {} write(s).", duration, pendingWriteList.size());
+        }
+    }
+
+    /**
+     * Executes a run of statements sharing one SQL string.
+     *
+     * <p>A single statement executes directly; several are bound onto one
+     * prepared statement and sent as a JDBC batch.</p>
+     *
+     * @param dslContext the transactional context
+     * @param queryList  the statements, all of identical shape
+     * @param table      the table being written, for the slow-write warning
+     */
+    private void execute(final DSLContext dslContext, final List<Query> queryList, final String table) {
+        final long start = System.nanoTime();
+
+        if (queryList.size() == 1) {
+            queryList.getFirst().execute();
+        } else {
+            BatchBindStep batchBindStep = dslContext.batch(queryList.getFirst());
+
+            for (final Query query : queryList) {
+                batchBindStep = batchBindStep.bind(query.getBindValues().toArray());
+            }
+
+            batchBindStep.execute();
         }
 
-        this.executorService.shutdown();
+        final long duration = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+        if (duration > this.batchQueueSettings.getWriteWarnMillis()) {
+            LOGGER.warn("Took {}ms to execute {} statement(s) against [{}].", duration, queryList.size(), table);
+        }
+    }
+
+    /**
+     * Stops accepting writes, waits for the scheduler to stop, then drains what
+     * remains.
+     *
+     * <p>Safe to call more than once — the first call wins and the rest return
+     * immediately, which is what lets both an explicit shutdown and the JVM hook
+     * call it.</p>
+     */
+    public void shutdown() {
+        if (!this.shutdown.compareAndSet(false, true)) {
+            return;
+        }
+
+        this.scheduledExecutorService.shutdown();
 
         try {
-            if (!(this.executorService.awaitTermination(30, TimeUnit.SECONDS))) {
-                final List<Runnable> dropped = this.executorService.shutdownNow();
-
-                if (!(dropped.isEmpty())) {
-                    LOGGER.warning("BatchQueue forced shutdown, dropped " + dropped.size() + " pending tasks");
-                }
+            if (!this.scheduledExecutorService.awaitTermination(this.batchQueueSettings.getShutdownTimeoutSeconds(), TimeUnit.SECONDS)) {
+                this.scheduledExecutorService.shutdownNow();
             }
         } catch (final InterruptedException e) {
-            this.executorService.shutdownNow();
+            this.scheduledExecutorService.shutdownNow();
             Thread.currentThread().interrupt();
         }
-    }
 
-    /**
-     * Returns the number of operations currently waiting in the queue.
-     *
-     * @return the pending operation count
-     */
-    @Override
-    public int pending() {
-        this.lock.lock();
-        try {
-            return this.queue.size();
-        } finally {
-            this.lock.unlock();
-        }
-    }
-
-    /**
-     * Drains the queue into a local list and dispatches it to the executor.
-     *
-     * <p>Must be called while holding {@link #lock}. The batch is submitted to the
-     * single-threaded executor, so batches run strictly in drain order. A failure
-     * within {@link #flushConsumer} is logged and does not affect later batches.</p>
-     *
-     * <p>If the executor rejects the task — which can only happen during the narrow
-     * window of {@link #shutdown()} — the batch is executed inline on the calling
-     * thread so its operations are not lost.</p>
-     */
-    private void drainAndExecute() {
-        if (this.queue.isEmpty()) {
-            return;
-        }
-
-        final List<T> operations = new ArrayList<>(this.queue);
-        this.queue.clear();
-
-        try {
-            this.executorService.execute(() -> {
-                try {
-                    this.flushConsumer.accept(operations);
-                } catch (final Exception e) {
-                    LOGGER.log(Level.SEVERE, "BatchQueue flush failed", e);
-                }
-            });
-        } catch (final RejectedExecutionException e) {
-            try {
-                this.flushConsumer.accept(operations);
-            } catch (final Exception inner) {
-                LOGGER.log(Level.SEVERE, "BatchQueue inline flush failed", inner);
-            }
-        }
+        this.drain();
     }
 }

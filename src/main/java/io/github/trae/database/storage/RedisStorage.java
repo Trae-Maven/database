@@ -1,132 +1,102 @@
 package io.github.trae.database.storage;
 
-import io.github.trae.database.constants.Constants;
-import io.github.trae.database.storage.interfaces.IRedisStorage;
-import io.github.trae.database.storage.interfaces.Storage;
-import io.github.trae.database.types.redis.RedisDatabaseDriver;
-import io.github.trae.utilities.UtilJava;
+import io.github.trae.database.driver.RedisDriver;
 import io.github.trae.utilities.UtilString;
+import io.lettuce.core.KeyValue;
+import io.lettuce.core.SetArgs;
 import lombok.AllArgsConstructor;
-import redis.clients.jedis.params.ScanParams;
-import redis.clients.jedis.params.SetParams;
-import redis.clients.jedis.resps.ScanResult;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
-import java.util.UUID;
-import java.util.function.Supplier;
+import java.util.Set;
 
 /**
- * Jedis-backed distributed implementation of {@link Storage} with native Redis TTL
- * via {@code SET ... EX}.
+ * Redis-backed cache tier, shared by every process pointing at the same Redis.
  *
- * <p>Keys are automatically prefixed with a configurable namespace using the format
- * {@code {redisKey}:{key}} to avoid collisions across different storage instances.
- * Values are serialized to JSON via {@link Constants#GSON} and deserialized using the
- * {@code Class<Value>} supplied at construction.</p>
+ * <p>Sits between {@link LocalStorage} and the database: slower than a map
+ * lookup, far cheaper than a query, and visible across a whole network of
+ * servers, so one server warming an entity serves the rest.</p>
  *
- * <p>All scan-based operations ({@link #flush}, {@link #getKeys}, {@link #getValues},
- * {@link #getSize}) use {@code SCAN} with a batch count of 100 instead of {@code KEYS}
- * to avoid blocking the Redis server. Value retrieval uses {@code MGET} for batch
- * efficiency within each scan iteration.</p>
+ * <p>Every key is prefixed with this storage's namespace, and each namespace also
+ * keeps a Redis set of its member keys. That index is what makes
+ * {@link #keys()}, {@link #values()} and {@link #size()} possible without a
+ * {@code SCAN} — Redis expires individual entries but cannot remove them from a
+ * set, so those methods detect entries whose value has gone and prune the index
+ * as they go.</p>
  *
- * @param <Value> the value type
- * @see Storage
- * @see RedisDatabaseDriver
+ * <p>Subclasses supply {@link #serialize(Object)} and
+ * {@link #deserialize(String)}, plus the {@link #index(Object)} and
+ * {@link #unIndex(Object)} rules deciding which key an entity lives under.</p>
+ *
+ * @param <Value> the cached value type
  */
 @AllArgsConstructor
-public abstract class RedisStorage<Value> implements IRedisStorage<Value> {
-
-    private final RedisDatabaseDriver redisDatabaseDriver;
-    private final Class<Value> valueClass;
-    private final String redisKey;
+public abstract class RedisStorage<Value> implements Storage<String, Value> {
 
     /**
-     * Stores a value in Redis. When a TTL is provided it is applied natively via
-     * {@code SET ... EX}; a {@code null} TTL stores the value without expiry.
+     * The connection used for every command.
+     */
+    private final RedisDriver redisDriver;
+
+    /**
+     * Prefix applied to every key this storage owns, keeping namespaces from
+     * colliding in a shared Redis.
+     */
+    private final String namespace;
+
+    /**
+     * {@inheritDoc}
      *
-     * @param key   the key to store under (will be prefixed with {@link #redisKey})
-     * @param value the value to store (serialized to JSON)
-     * @param ttl   the time-to-live duration, or {@code null} for no expiry
+     * <p>Writes the value and adds the key to the namespace index in the same
+     * round trip. A null time-to-live stores the entry without expiry.</p>
      */
     @Override
-    public void put(final String key, final Value value, final Duration ttl) {
-        if (key == null) {
-            throw new IllegalArgumentException("Key cannot be null.");
+    public void put(final String key, final Value value) {
+        if (UtilString.isEmpty(key) || value == null) {
+            return;
         }
 
-        this.redisDatabaseDriver.useResource(jedis -> {
+        final String resolvedKey = this.resolveKey(key);
+        final String serializedValue = this.serialize(value);
+
+        final Duration ttl = this.getTTL();
+
+        this.redisDriver.useResource(commands -> {
             if (ttl == null) {
-                jedis.set(this.key(key), Constants.GSON.toJson(value));
+                commands.set(resolvedKey, serializedValue);
             } else {
-                jedis.set(this.key(key), Constants.GSON.toJson(value), SetParams.setParams().ex(ttl.toSeconds()));
+                commands.set(resolvedKey, serializedValue, SetArgs.Builder.px(ttl.toMillis()));
             }
+
+            commands.sadd(this.resolveIndexKey(), key);
         });
     }
 
-    @Override
-    public void put(final String key, final Value value) {
-        this.put(key, value, null);
-    }
-
     /**
-     * Deletes a key from Redis.
+     * {@inheritDoc}
      *
-     * @param key the key to remove (will be prefixed with {@link #redisKey})
+     * <p>Deletes the entry and drops its key from the namespace index.</p>
      */
     @Override
     public void remove(final String key) {
-        if (key == null) {
-            throw new IllegalArgumentException("Key cannot be null.");
+        if (UtilString.isEmpty(key)) {
+            return;
         }
 
-        this.redisDatabaseDriver.useResource(jedis -> jedis.del(this.key(key)));
-    }
-
-    /**
-     * Replaces an entry under a new key. Deletes the previous key first, then
-     * stores the value under the new key if both key and value are non-null,
-     * applying the TTL via {@code SET ... EX} when provided. The delete and set
-     * run on a single connection but are two separate commands, not a transaction.
-     *
-     * @param previousKey the old key to delete
-     * @param key         the new key to store under
-     * @param value       the value to store (serialized to JSON)
-     * @param ttl         the time-to-live duration, or {@code null} for no expiry
-     */
-    @Override
-    public void update(final String previousKey, final String key, final Value value, final Duration ttl) {
-        if (previousKey == null) {
-            throw new IllegalArgumentException("Previous Key cannot be null.");
-        }
-
-        this.redisDatabaseDriver.useResource(jedis -> {
-            jedis.del(this.key(previousKey));
-
-            if (key != null && value != null) {
-                if (ttl == null) {
-                    jedis.set(this.key(key), Constants.GSON.toJson(value));
-                } else {
-                    jedis.set(this.key(key), Constants.GSON.toJson(value), SetParams.setParams().ex(ttl.toSeconds()));
-                }
-            }
+        this.redisDriver.useResource(commands -> {
+            commands.del(this.resolveKey(key));
+            commands.srem(this.resolveIndexKey(), key);
         });
     }
 
-    @Override
-    public void update(final String previousKey, final String key, final Value value) {
-        this.update(previousKey, key, value, null);
-    }
-
     /**
-     * Retrieves and deserializes a value from Redis.
+     * {@inheritDoc}
      *
-     * <p>Deserialized into {@code Value} using the class supplied at construction.</p>
-     *
-     * @param key the key to look up (will be prefixed with {@link #redisKey})
-     * @return the deserialized value if present, otherwise empty
+     * <p>A miss prunes the key from the namespace index, cleaning up after
+     * Redis-side expiry.</p>
      */
     @Override
     public Optional<Value> get(final String key) {
@@ -134,242 +104,218 @@ public abstract class RedisStorage<Value> implements IRedisStorage<Value> {
             return Optional.empty();
         }
 
-        return this.redisDatabaseDriver.getResource(jedis -> Optional.ofNullable(jedis.get(this.key(key))).map(value -> Constants.GSON.fromJson(value, this.valueClass)));
+        final String value = this.redisDriver.getResource(commands -> commands.get(this.resolveKey(key)));
+
+        if (value == null) {
+            this.redisDriver.useResource(commands -> commands.srem(this.resolveIndexKey(), key));
+            return Optional.empty();
+        }
+
+        return Optional.of(this.deserialize(value));
     }
 
     /**
-     * Retrieves a value, or loads it via the supplied loader on a cache miss, using a
-     * distributed lock to prevent stampedes across instances.
+     * {@inheritDoc}
      *
-     * <p>On a miss, the first caller across all instances acquires a short-lived lock
-     * via {@code SET NX EX}, runs the loader, and populates the cache. Concurrent callers
-     * that fail to acquire the lock wait and re-read, served the freshly populated value
-     * rather than each invoking the loader. If the lock holder does not populate the key
-     * within {@code maxRetries} attempts, waiters fall through and invoke the loader
-     * directly as a safety valve.</p>
-     *
-     * @param key        the key to look up (will be prefixed with {@link #redisKey})
-     * @param ttl        the time-to-live applied to a loaded value, or {@code null} for no expiry
-     * @param loader     supplies the value on a miss; an empty result is not cached
-     * @param lockTtl    the lock's safety expiry, guarding against a crashed loader
-     * @param maxRetries how many times a lock-loser re-reads before falling through to the loader
-     * @param retryDelay how long to wait between re-reads
-     * @return the cached or freshly loaded value, or empty if the loader returns empty
-     */
-    public Optional<Value> getOrLoad(final String key, final Duration ttl, final Supplier<Optional<Value>> loader, final Duration lockTtl, final int maxRetries, final Duration retryDelay) {
-        final Optional<Value> cached = this.get(key);
-
-        if (cached.isPresent()) {
-            return cached;
-        }
-
-        final String lockKey = "lock:%s".formatted(this.key(key));
-        final String lockToken = UUID.randomUUID().toString();
-
-        final boolean acquired = this.redisDatabaseDriver.getResource(jedis -> "OK".equals(jedis.set(lockKey, lockToken, SetParams.setParams().nx().ex(lockTtl.toSeconds()))));
-
-        if (acquired) {
-            try {
-                final Optional<Value> recheck = this.get(key);
-
-                if (recheck.isPresent()) {
-                    return recheck;
-                }
-
-                final Optional<Value> loaded = loader.get();
-
-                loaded.ifPresent(value -> this.put(key, value, ttl));
-
-                return loaded;
-            } finally {
-                this.releaseLock(lockKey, lockToken);
-            }
-        }
-
-        for (int attempt = 0; attempt < maxRetries; attempt++) {
-            try {
-                Thread.sleep(retryDelay.toMillis());
-            } catch (final InterruptedException e) {
-                Thread.currentThread().interrupt();
-
-                break;
-            }
-
-            final Optional<Value> retry = this.get(key);
-
-            if (retry.isPresent()) {
-                return retry;
-            }
-        }
-
-        return loader.get();
-    }
-
-    /**
-     * Checks whether a key exists in Redis.
-     *
-     * @param key the key to check (will be prefixed with {@link #redisKey})
-     * @return {@code true} if the key exists
+     * <p>A miss prunes the key from the namespace index.</p>
      */
     @Override
     public boolean contains(final String key) {
         if (UtilString.isEmpty(key)) {
-            throw new IllegalArgumentException("Key cannot be null or empty.");
+            return false;
         }
 
-        return this.redisDatabaseDriver.getResource(jedis -> jedis.exists(this.key(key)));
+        final boolean contains = this.redisDriver.getResource(commands -> commands.exists(this.resolveKey(key))) > 0;
+
+        if (!contains) {
+            this.redisDriver.useResource(commands -> commands.srem(this.resolveIndexKey(), key));
+        }
+
+        return contains;
     }
 
     /**
-     * Deletes all keys matching this storage's prefix using {@code SCAN} + batch {@code DEL}.
+     * {@inheritDoc}
      *
-     * <p>Iterates in batches of 100 to avoid blocking the Redis server.</p>
+     * <p>Reads the namespace index, then verifies each key with a single
+     * {@code MGET}, dropping any whose value has expired.</p>
      */
     @Override
-    public void flush() {
-        this.redisDatabaseDriver.useResource(jedis -> {
-            final ScanParams scanParams = new ScanParams().match(this.key("*")).count(100);
+    public Set<String> keys() {
+        final Set<String> keySet = new HashSet<>(this.redisDriver.getResource(commands -> commands.smembers(this.resolveIndexKey())));
 
-            String cursor = ScanParams.SCAN_POINTER_START;
+        if (keySet.isEmpty()) {
+            return keySet;
+        }
 
-            do {
-                final ScanResult<String> scanResult = jedis.scan(cursor, scanParams);
+        final List<KeyValue<String, String>> keyValueList = this.redisDriver.getResource(commands -> commands.mget(keySet.stream().map(this::resolveKey).toArray(String[]::new)));
 
-                final List<String> keys = scanResult.getResult();
+        final Set<String> expiredKeySet = new HashSet<>();
 
-                if (!(keys.isEmpty())) {
-                    jedis.del(keys.toArray(String[]::new));
-                }
-
-                cursor = scanResult.getCursor();
-            } while (!(cursor.equals(ScanParams.SCAN_POINTER_START)));
+        keyValueList.forEach(keyValue -> {
+            if (!keyValue.hasValue()) {
+                expiredKeySet.add(this.unresolveKey(keyValue.getKey()));
+            }
         });
+
+        if (!expiredKeySet.isEmpty()) {
+            this.redisDriver.useResource(commands -> commands.srem(this.resolveIndexKey(), expiredKeySet.toArray(String[]::new)));
+            keySet.removeAll(expiredKeySet);
+        }
+
+        return keySet;
     }
 
     /**
-     * Returns all keys matching this storage's prefix with the prefix stripped.
+     * {@inheritDoc}
      *
-     * <p>Uses {@code SCAN} to iterate in batches. Each returned key has the
-     * {@code {redisKey}:} prefix removed, returning the raw key as originally stored.</p>
-     *
-     * @return a list of raw keys (without the Redis prefix)
+     * <p>Fetches every indexed key in one {@code MGET} and deserialises the
+     * values that are still present, pruning the rest from the index.</p>
      */
     @Override
-    public List<String> getKeys() {
-        return this.redisDatabaseDriver.getResource(jedis -> {
-            final ScanParams scanParams = new ScanParams().match(this.key("*")).count(100);
+    public List<Value> values() {
+        final Set<String> keySet = this.redisDriver.getResource(commands -> commands.smembers(this.resolveIndexKey()));
+        if (keySet.isEmpty()) {
+            return List.of();
+        }
 
-            final int prefixLength = this.redisKey.length() + 1;
+        final List<Value> valueList = new ArrayList<>();
+        final Set<String> expiredKeySet = new HashSet<>();
 
-            return UtilJava.createCollection(new ArrayList<>(), list -> {
-                String cursor = ScanParams.SCAN_POINTER_START;
+        this.redisDriver.getResource(commands -> commands.mget(
+                keySet.stream()
+                        .map(this::resolveKey)
+                        .toArray(String[]::new)
+        )).forEach(keyValue -> {
+            if (keyValue.hasValue()) {
+                valueList.add(this.deserialize(keyValue.getValue()));
+            } else {
+                expiredKeySet.add(this.unresolveKey(keyValue.getKey()));
+            }
+        });
 
-                do {
-                    final ScanResult<String> scanResult = jedis.scan(cursor, scanParams);
+        if (!expiredKeySet.isEmpty()) {
+            this.redisDriver.useResource(commands -> commands.srem(this.resolveIndexKey(), expiredKeySet.toArray(String[]::new)));
+        }
 
-                    for (final String key : scanResult.getResult()) {
-                        list.add(key.substring(prefixLength));
+        return valueList;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Counts only keys whose values still exist, pruning the index of any that
+     * have expired. Not a plain {@code SCARD}, since the index can outlive the
+     * entries it names.</p>
+     */
+    @Override
+    public long size() {
+        final Set<String> keySet = this.redisDriver.getResource(commands -> commands.smembers(this.resolveIndexKey()));
+        if (keySet.isEmpty()) {
+            return 0;
+        }
+
+        final Set<String> expiredKeySet = new HashSet<>();
+
+        final long size = this.redisDriver.getResource(commands -> commands.mget(keySet.stream().map(this::resolveKey).toArray(String[]::new)))
+                .stream()
+                .filter(keyValue -> {
+                    if (keyValue.hasValue()) {
+                        return true;
                     }
 
-                    cursor = scanResult.getCursor();
-                } while (!(cursor.equals(ScanParams.SCAN_POINTER_START)));
-            });
+                    expiredKeySet.add(this.unresolveKey(keyValue.getKey()));
+                    return false;
+                }).count();
+
+        if (!expiredKeySet.isEmpty()) {
+            this.redisDriver.useResource(commands -> commands.srem(this.resolveIndexKey(), expiredKeySet.toArray(String[]::new)));
+        }
+
+        return size;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Unlinks every entry in the namespace and deletes the index itself.
+     * {@code UNLINK} frees the values on a background thread, so a large
+     * namespace does not stall Redis.</p>
+     */
+    @Override
+    public void clear() {
+        final Set<String> keySet = this.redisDriver.getResource(commands -> commands.smembers(this.resolveIndexKey()));
+        if (keySet.isEmpty()) {
+            this.redisDriver.useResource(commands -> commands.del(this.resolveIndexKey()));
+            return;
+        }
+
+        this.redisDriver.useResource(commands -> {
+            commands.unlink(keySet.stream().map(this::resolveKey).toArray(String[]::new));
+
+            commands.del(this.resolveIndexKey());
         });
     }
 
     /**
-     * Returns all values matching this storage's prefix.
+     * {@inheritDoc}
      *
-     * <p>Uses {@code SCAN} to discover keys in batches, then {@code MGET} to
-     * retrieve values in bulk within each iteration. Null results (expired keys
-     * between scan and fetch) are silently skipped.</p>
+     * <p>Two round trips — a {@code DEL} plus {@code SREM} for the old key, then
+     * a {@code SET} plus {@code SADD} for the new one. Skipping it leaves the old
+     * key serving a stale entity to every server on the network until its
+     * time-to-live runs out.</p>
      *
-     * @return a list of deserialized values
+     * <p>The entity must already hold its new value; the previous key is passed
+     * in because it can no longer be derived from the entity.</p>
      */
     @Override
-    public List<Value> getValues() {
-        return this.redisDatabaseDriver.getResource(jedis -> {
-            final ScanParams scanParams = new ScanParams().match(this.key("*")).count(100);
-
-            return UtilJava.createCollection(new ArrayList<>(), list -> {
-                String cursor = ScanParams.SCAN_POINTER_START;
-
-                do {
-                    final ScanResult<String> scanResult = jedis.scan(cursor, scanParams);
-                    final List<String> keys = scanResult.getResult();
-
-                    if (!(keys.isEmpty())) {
-                        for (final String json : jedis.mget(keys.toArray(String[]::new))) {
-                            if (json != null) {
-                                list.add(Constants.GSON.fromJson(json, this.valueClass));
-                            }
-                        }
-                    }
-
-                    cursor = scanResult.getCursor();
-                } while (!(cursor.equals(ScanParams.SCAN_POINTER_START)));
-            });
-        });
+    public void reIndex(final Value value, final String previousKey) {
+        this.remove(previousKey);
+        this.index(value);
     }
 
     /**
-     * Returns the number of keys matching this storage's prefix.
+     * Prefixes a key with this storage's namespace.
      *
-     * <p>Uses {@code SCAN} to count keys in batches without loading values.</p>
-     *
-     * @return the total number of matching keys
+     * @param key the bare key
+     * @return the full Redis key
      */
-    @Override
-    public int getSize() {
-        return this.redisDatabaseDriver.getResource(jedis -> {
-            final ScanParams scanParams = new ScanParams().match(this.key("*")).count(100);
-
-            int count = 0;
-
-            String cursor = ScanParams.SCAN_POINTER_START;
-
-            do {
-                final ScanResult<String> scanResult = jedis.scan(cursor, scanParams);
-
-                count += scanResult.getResult().size();
-
-                cursor = scanResult.getCursor();
-            } while (!(cursor.equals(ScanParams.SCAN_POINTER_START)));
-
-            return count;
-        });
+    private String resolveKey(final String key) {
+        return this.namespace + ":" + key;
     }
 
     /**
-     * Checks whether any keys exist under this storage's prefix.
+     * Strips this storage's namespace from a full Redis key.
      *
-     * @return {@code true} if no matching keys exist
+     * @param key the full Redis key
+     * @return the bare key as held in the namespace index
      */
-    @Override
-    public boolean isEmpty() {
-        return this.getSize() <= 0;
+    private String unresolveKey(final String key) {
+        return key.substring(this.namespace.length() + 1);
     }
 
     /**
-     * Builds the full Redis key by prefixing with the storage namespace.
+     * Returns the key of the Redis set holding this namespace's member keys.
      *
-     * @param key the raw key
-     * @return the prefixed key in the format {@code {redisKey}:{key}}
+     * @return the namespace index key
      */
-    private String key(final String key) {
-        return "%s:%s".formatted(this.redisKey, key);
+    private String resolveIndexKey() {
+        return this.namespace + ":__index";
     }
 
     /**
-     * Releases a distributed lock only if the caller still owns it, comparing the
-     * stored token against the expected token via an atomic {@code GET}/{@code DEL}
-     * Lua script. This prevents deleting a lock that has expired and been re-acquired
-     * by another instance.
+     * Encodes a value for storage.
      *
-     * @param lockKey   the full (already prefixed) lock key
-     * @param lockToken the token proving ownership of the lock
+     * @param value the value to encode
+     * @return the encoded form
      */
-    private void releaseLock(final String lockKey, final String lockToken) {
-        this.redisDatabaseDriver.useResource(jedis -> jedis.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", List.of(lockKey), List.of(lockToken)));
-    }
+    protected abstract String serialize(final Value value);
+
+    /**
+     * Decodes a stored value.
+     *
+     * @param value the encoded form
+     * @return the reconstructed value
+     */
+    protected abstract Value deserialize(final String value);
 }

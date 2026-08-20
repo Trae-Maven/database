@@ -1,91 +1,66 @@
 # Database
 
-A unified database abstraction layer providing property-enum-driven domain mapping, repository-based CRUD operations, local/remote storage with TTL support, and multi-backend support for MongoDB, MySQL, and Redis.
+A PostgreSQL data-access library built on jOOQ, with declarative property mapping, deferred batched writes, and tiered local → Redis → database lookups with request coalescing.
 
-Database eliminates boilerplate by handling serialization, deserialization, batched writes, filtering, indexing, and async operations behind a single `DatabaseDriver` interface. Define a domain, set up a repository, and the framework does the rest.
+Database removes the boilerplate around persistence. Declare an entity's columns once as property constants, extend a repository, and you get schema creation, migration, indexes, reads, writes and caching without writing a query or a mapper.
 
 ---
 
 ## Features
 
-- **Domain mapping** — define persistable entities with a property enum and a `DomainData` constructor; the framework handles all serialization and deserialization
-- **Repository pattern** — extend `AbstractRepository` for zero-boilerplate CRUD, sync/async reads, exists, count, and index management
-- **Filter-based write matching** — override `getFiltersByDomain` to upsert, update, and delete by compound field conditions instead of `_id`, enabling one-doc-per-combination patterns (e.g. one wishlist entry per user per product)
-- **Universal filter system** — fluent `FilterBuilder` with operators (equals, greater than, in, regex, exists, etc.) that translate to native queries on any backend
-- **Query options** — sort, limit, and skip via `QueryOptions` for paginated and ordered queries
-- **Index management** — declare single and compound indexes with `.on()` chaining and `.unique()`, applied identically across MongoDB and MySQL
-- **Batched writes** — generic `BatchQueue<T>` with `ReentrantLock`-based thread safety, configurable batch size and flush interval, instant mode, and graceful shutdown with 30s termination timeout
-- **MongoDB driver** — grouped `bulkWrite` per collection, `_id` as UUID primary key, full filter/sort/index translation to native BSON
-- **MySQL driver** — HikariCP connection pooling, transactional batch execution, automatic `CREATE DATABASE`/`CREATE TABLE`, parameterized queries throughout
-- **Redis driver** — Jedis-backed connection pooling with `useResource`/`getResource` helpers for clean resource management
-- **Local storage** — `ConcurrentHashMap`-backed in-memory key-value storage with per-key TTL, lazy expiry eviction on reads, and batched background cleanup
-- **Redis storage** — Jedis-backed key-value storage with native `SETEX` TTL, `SCAN`-based iteration, and `MGET` batch retrieval
-- **Storage interface** — unified `Storage<Key, Value>` contract shared by both `LocalStorage` and `RedisStorage`, enabling drop-in swaps between local and remote caching
+- **Property-driven mapping** — declare each column once as an `EntityProperty` constant holding its name, getter, setter and SQL type; the framework derives the schema, the reads and the writes from that
+- **Repository pattern** — extend `EntityRepository` for CRUD, condition and property-based finders, paging, existence checks and counts, with no per-entity query code
+- **Schema management** — `createTable`, `migrateSchema`, `dropTable` and `createIndexes` generated from the registered properties and run automatically when the driver connects
+- **Index declaration** — override `getIndexes()` to map properties to a `BTREE`, `GIN_TRGM` or `BRIN` index; the `pg_trgm` extension is installed on connect
+- **Value converters** — store any Java type in any column type through a `ValueConverter`; enum and JSON converters are built in, and conversion happens transparently on both read and write
+- **Deferred batched writes** — every write goes through a `BatchQueue` that coalesces writes to the same entity, orders them by arrival, and commits them in chunked transactions on its own thread
+- **Statement batching** — runs of identical SQL within a transaction execute as a single JDBC batch, which pgjdbc rewrites into one multi-row statement
+- **Tiered lookups** — `LookupProvider` walks local storage, then Redis, then the database, caching what it finds on the way back
+- **Request coalescing** — concurrent identical lookups share one piece of work instead of stampeding the database, with synchronous and asynchronous callers joining the same in-flight request
+- **Virtual thread execution** — lookups run on virtual threads, so blocking JDBC and Redis calls never occupy a platform thread or a fixed pool
+- **Local storage** — `ConcurrentHashMap`-backed cache with per-storage TTL, lazy eviction on read and a periodic sweep, with no background scheduler
+- **Redis storage** — Lettuce-backed distributed cache with native TTL, a per-namespace key index enabling iteration without `SCAN`, and `MGET` batch retrieval
+- **Redis pub/sub** — publish and subscribe on the same driver, for cross-server cache invalidation on a multi-instance deployment
+- **Framework-agnostic** — no Spring or dependency-injection annotations anywhere in the library; annotate your own classes for whichever container you use
 
 ---
 
 ## Requirements
 
-Your project must already include the following dependencies:
+Your project must already include the following dependency:
+
 ```xml
 <dependency>
     <groupId>org.projectlombok</groupId>
     <artifactId>lombok</artifactId>
-    <version>1.18.44</version>
+    <version>1.18.46</version>
     <scope>provided</scope>
 </dependency>
 ```
 
-These dependencies are marked as **provided** inside Database because they are expected to already exist in your application.
+Lombok is marked as **provided** inside Database because it is expected to already exist in your application.
+
+Java 21 or later is required — the library uses virtual threads and sequenced collections.
 
 ---
 
 ## Built-in Dependencies
 
-Database includes the following dependency that is automatically included when you install the library.
+These are pulled in automatically when you install Database and do not need to be added manually.
 
-- [Utilities](https://github.com/Trae-Maven/utilities) – Shared helper classes and performance-focused utilities used internally by the framework.
-
-**MongoDB backend:**
-```xml
-<dependency>
-    <groupId>org.mongodb</groupId>
-    <artifactId>mongodb-driver-sync</artifactId>
-    <version>5.6.2</version>
-</dependency>
-```
-
-**MySQL backend:**
-```xml
-<dependency>
-    <groupId>com.zaxxer</groupId>
-    <artifactId>HikariCP</artifactId>
-    <version>7.0.2</version>
-</dependency>
-
-<dependency>
-    <groupId>com.mysql</groupId>
-    <artifactId>mysql-connector-j</artifactId>
-    <version>9.6.0</version>
-</dependency>
-```
-
-**Redis backend:**
-```xml
-<dependency>
-    <groupId>redis.clients</groupId>
-    <artifactId>jedis</artifactId>
-    <version>5.2.0</version>
-</dependency>
-```
-
-These dependencies are automatically included when installing Database and do not need to be added manually.
+- [Utilities](https://github.com/Trae-Maven/utilities) — shared helper classes used internally by the framework
+- `org.jooq:jooq` — SQL construction, type binding and value conversion
+- `org.postgresql:postgresql` — the PostgreSQL JDBC driver
+- `com.zaxxer:HikariCP` — connection pooling
+- `io.lettuce:lettuce-core` — Redis client
+- `com.google.code.gson:gson` — JSON encoding for the JSON value converter
 
 ---
 
 ## Installation
 
 Add the repository and dependency to your `pom.xml`:
+
 ```xml
 <repository>
     <id>github-database</id>
@@ -95,8 +70,8 @@ Add the repository and dependency to your `pom.xml`:
 
 ```xml
 <dependency>
-    <groupId>io.github.trae.database</groupId>
-    <artifactId>Database</artifactId>
+    <groupId>io.github.trae</groupId>
+    <artifactId>database</artifactId>
     <version>0.0.1</version>
 </dependency>
 ```
@@ -105,127 +80,342 @@ Add the repository and dependency to your `pom.xml`:
 
 ## Integration Guide
 
-Database requires three classes to be set up in your application: a property enum, a domain class, and a repository. An optional manager service handles your business logic.
+Per entity: the entity itself, a property holder, and a repository. Add a storage per cached key and an `EntityHolder` manager on top for tiered lookups.
 
-### 1. Define Your Property Enum
+### 1. Define Your Entity
 
-Create an enum that implements `DomainProperty`. Each constant represents a persistable field on the domain:
-```java
-public enum AccountProperty implements DomainProperty {
+Implement `Entity` and declare a constructor taking the identifier — the repository uses it to rebuild entities from result rows.
 
-    EMAIL, USERNAME, PASSWORD
-}
-```
-
-### 2. Define Your Domain
-
-Your domain class must implement `Domain<Property>` with a `DomainData` constructor for deserialization and a `getValueByProperty` switch for serialization:
 ```java
 @RequiredArgsConstructor
 @Getter
 @Setter
-public class Account implements Domain<AccountProperty> {
+public class Account implements Entity {
 
     private final UUID id;
 
-    private String email, username, password;
+    private String email, password;
 
-    public Account(final DomainData<AccountProperty> domainData) {
-        this(domainData.getIdentifier());
+    private AccountRole role;
 
-        this.email = domainData.get(String.class, AccountProperty.EMAIL);
-        this.username = domainData.get(String.class, AccountProperty.USERNAME);
-        this.password = domainData.get(String.class, AccountProperty.PASSWORD);
+    private RefreshToken refreshToken;
+
+    private long createdAt;
+}
+```
+
+### 2. Declare Your Properties
+
+Each constant binds one column to its getter, setter and SQL type. This is the only place a column name appears.
+
+```java
+public class AccountProperty {
+
+    public static final EntityProperty<Account, String> EMAIL = EntityProperty.register(
+            Account.class,
+            "email",
+            Account::getEmail,
+            Account::setEmail,
+            SQLDataType.VARCHAR
+    );
+
+    public static final EntityProperty<Account, String> PASSWORD = EntityProperty.register(
+            Account.class,
+            "password",
+            Account::getPassword,
+            Account::setPassword,
+            SQLDataType.VARCHAR
+    );
+
+    public static final EntityProperty<Account, Long> CREATED_AT = EntityProperty.register(
+            Account.class,
+            "createdAt",
+            Account::getCreatedAt,
+            Account::setCreatedAt,
+            SQLDataType.BIGINT
+    );
+
+    public static final EntityProperty<Account, AccountRole> ROLE = EntityProperty.registerWithConverter(
+            Account.class,
+            "role",
+            Account::getRole,
+            Account::setRole,
+            new EnumValueConverter<>(AccountRole.class)
+    );
+
+    public static final EntityProperty<Account, RefreshToken> REFRESH_TOKEN = EntityProperty.registerWithConverter(
+            Account.class,
+            "refreshToken",
+            Account::getRefreshToken,
+            Account::setRefreshToken,
+            new JsonValueConverter<>(RefreshToken.class)
+    );
+}
+```
+
+Registration happens in the holder's static initialiser, so the class must be loaded before the repository does any schema or read work. Referencing any one constant is enough.
+
+### 3. Create Your Repository
+
+Extend `EntityRepository`, passing the entity class and table name. Everything else is inherited. Override `getIndexes()` to declare indexes.
+
+If you're using Spring Boot or [dependency-injector](https://github.com/Trae-Maven/dependency-injector) for component scanning, annotate the class with `@Repository`:
+
+```java
+@Repository
+public class AccountRepository extends EntityRepository<Account> {
+
+    public AccountRepository(final MyDatabaseDriver databaseDriver) {
+        super(databaseDriver, Account.class, "Accounts");
     }
 
     @Override
-    public Object getValueByProperty(final AccountProperty accountProperty) {
-        return switch (accountProperty) {
-            case EMAIL -> this.getEmail();
-            case USERNAME -> this.getUsername();
-            case PASSWORD -> this.getPassword();
-        };
+    protected Map<EntityProperty<Account, ?>, IndexType> getIndexes() {
+        return Map.of(AccountProperty.EMAIL, IndexType.BTREE);
+    }
+
+    public Optional<Account> findByEmail(final String email) {
+        return this.findOne(AccountProperty.EMAIL, email);
     }
 }
 ```
 
-### 3. Create Your Repository
+The repository registers itself with the driver on construction. Build every repository first, then call `connect()` — that is when tables, columns and indexes are brought up to date.
 
-Extend `AbstractRepository` and pass the database/collection names through the constructor. All CRUD, filtering, and async operations are inherited — zero boilerplate. Override `registerIndexes()` to declare indexes.
+### 4. Add Cached Lookups
 
-If you're using Spring Boot or [dependency-injector](https://github.com/Trae-Maven/dependency-injector) for component scanning, annotate the class with `@Component`:
+Implement `EntityHolder` on your manager to get tiered, coalesced lookups by identifier for free.
+
 ```java
-@Component
-public class AccountRepository extends AbstractRepository<Account, AccountProperty> {
+@Service
+@RequiredArgsConstructor
+@Getter
+public class AccountManager implements EntityHolder<Account, AccountRepository> {
 
-    public AccountRepository(final DatabaseDriver databaseDriver) {
-        super(databaseDriver, "Admin", "Accounts");
+    private final AccountRepository repository;
+    private final AccountIdLocalStorage idLocalStorage;
+    private final AccountIdRedisStorage idRedisStorage;
+
+    private final LookupProvider<Account> lookupProvider = new LookupProvider<>(this);
+
+    @Override
+    public void cacheEntity(final Account account) {
+        this.idLocalStorage.index(account);
+        this.idRedisStorage.index(account);
     }
 
     @Override
-    public void registerIndexes() {
-        this.addIndex(new Index().on(AccountProperty.EMAIL.name(), SortDirection.ASCENDING).unique());
-        this.addIndex(new Index().on(AccountProperty.USERNAME.name(), SortDirection.ASCENDING).unique());
+    public void evictEntity(final Account account) {
+        this.idLocalStorage.unIndex(account);
+        this.idRedisStorage.unIndex(account);
     }
+}
+```
+
+`@Getter` satisfies `getRepository()`, `getIdLocalStorage()`, `getIdRedisStorage()` and `getLookupProvider()`, so the only methods left to write are the two cache hooks.
+
+```java
+final Optional<Account> accountOptional = accountManager.getEntityByIdSynchronously(id);
+
+accountManager.getEntityByIdAsynchronously(id).thenAccept(accountOptional -> accountOptional.ifPresent(this::handle));
+
+// Existence across all three tiers, without building the entity
+final boolean exists = accountManager.isEntityById(id);
+```
+
+Additional lookups follow the same shape with their own namespace, storage and repository fallback:
+
+```java
+public Optional<Account> getEntityByEmailSynchronously(final String email) {
+    return this.getLookupProvider().lookupEntitySynchronously(
+            "email",
+            email,
+            this.emailLocalStorage,
+            this.emailRedisStorage,
+            this::cacheEntity,
+            this.getRepository()::findByEmail
+    );
 }
 ```
 
 ---
 
-## Storage
+## Reads and Writes
 
-The `Storage<Key, Value>` interface provides a unified contract for key-value storage with TTL support. Two implementations are included: `LocalStorage` for in-memory caching and `RedisStorage` for distributed caching via Redis.
-
-Both share the same interface, so you can swap between local and remote storage without changing your business logic.
-
-### Storage Interface
+Reads run immediately. Writes are deferred to the batch queue, so a read issued while a write for the same entity is still queued returns the row as it currently stands in the database.
 
 ```java
-public interface Storage<Key, Value> {
+// Reads
+final Optional<Account> account = accountRepository.findById(id);
+final Optional<Account> byEmail = accountRepository.findOne(AccountProperty.EMAIL, "trae@example.com");
+final List<Account> page = accountRepository.findPage(null, AccountProperty.CREATED_AT.getField().desc(), 0, 25);
+final boolean taken = accountRepository.exists(AccountProperty.EMAIL, "trae@example.com");
+final long total = accountRepository.count();
 
-    void put(Key key, Value value, Duration ttl);
+// Reading one column without building the entity
+final Optional<Long> createdAt = accountRepository.findValue(AccountProperty.CREATED_AT, id);
 
-    void remove(Key key);
+// Writes
+accountRepository.save(account);                                    // every column, as an upsert
+accountRepository.update(account, AccountProperty.EMAIL);           // one column
+accountRepository.update(account, List.of(AccountProperty.EMAIL, AccountProperty.PASSWORD));
+accountRepository.delete(account);
+```
 
-    void update(Key previousKey, Key key, Value value, Duration ttl);
+`update` reads values off the entity as it runs, so apply your setters before calling it.
 
-    Optional<Value> get(Key key);
+| Method | Statement |
+|---|---|
+| `save` | `INSERT ... ON CONFLICT (id) DO UPDATE` |
+| `update` | `UPDATE ... SET <named columns> WHERE id = ?` |
+| `delete` | `DELETE FROM ... WHERE id = ?` |
 
-    boolean contains(Key key);
+---
 
-    void flush();
+## Value Converters
 
-    List<Key> getKeys();
+A `ValueConverter<Value, Stored>` describes how a Java value is stored in a column of a different type. The converter chooses the storage type, and jOOQ applies the conversion on every bind and every fetch — nothing downstream is aware it exists.
 
-    List<Value> getValues();
+Two are built in:
 
-    int getSize();
+| Converter | Stored as | Use |
+|---|---|---|
+| `EnumValueConverter` | `VARCHAR` | Enum constants, stored by name so constants can be reordered |
+| `JsonValueConverter` | `JSONB` | Nested objects and collections written and read whole |
 
-    boolean isEmpty();
+```java
+// A nested object
+new JsonValueConverter<>(RefreshToken.class)
 
-    void index(Value value);
+// A generic collection — the element type is preserved
+JsonValueConverter.ofList(String.class)
+```
 
-    void unIndex(Value value);
+Writing your own means implementing five methods:
+
+```java
+@Getter
+public class LocationValueConverter implements ValueConverter<Location, String> {
+
+    private final Class<Location> valueType = Location.class;
+
+    @Override
+    public DataType<String> getDataType() {
+        return SQLDataType.VARCHAR;
+    }
+
+    @Override
+    public Class<String> getStoredType() {
+        return String.class;
+    }
+
+    @Override
+    public String serialize(final Location value) {
+        return "%s,%s,%s,%s".formatted(value.getWorld().getName(), value.getX(), value.getY(), value.getZ());
+    }
+
+    @Override
+    public Location deserialize(final String stored) {
+        final String[] parts = stored.split(",");
+
+        return new Location(Bukkit.getWorld(parts[0]), Double.parseDouble(parts[1]), Double.parseDouble(parts[2]), Double.parseDouble(parts[3]));
+    }
 }
 ```
 
-### LocalStorage
+JSONB is one column and tolerates shape changes, but its inner fields cannot be filtered or indexed cheaply. A value you would ever put in a `WHERE` clause belongs in real columns instead.
 
-`ConcurrentHashMap`-backed in-memory storage with per-key TTL. Each entry is wrapped in a `Cache<Value>` object that tracks its creation time and TTL duration.
+---
 
-**Expiry behavior:**
+## Schema Management
 
-- On `get()` — if the entry has expired, it is lazily removed and `Optional.empty()` is returned
-- On `getKeys()`, `getValues()`, `getSize()` — expired entries are filtered out of results
-- **Background eviction** — every 60 seconds (triggered on the next `get()` call), a sweep removes up to 10,000 expired entries per pass to prevent memory buildup without causing lag spikes. If more than 10,000 expired entries exist, the sweep continues on the next `get()` call immediately until all expired entries are cleaned
-- Passing a `null` TTL to `Cache` makes the entry permanent — it never expires
+The schema is derived from the registered properties — each carries its own `DataType`, including any converter's storage type. All four operations live on the repository and the first three run automatically on connect.
+
+| Method | Behaviour |
+|---|---|
+| `createTable` | `CREATE TABLE IF NOT EXISTS` with a column per property and the identifier as primary key |
+| `migrateSchema` | `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for every property, additive only |
+| `createIndexes` | Creates each index declared by `getIndexes()` if it does not exist |
+| `dropTable` | `DROP TABLE IF EXISTS` |
+
+Migration only adds columns. A column whose type has changed is left alone, so type changes have to be applied by hand before the table holds rows.
+
+### Index Types
 
 ```java
-public class AccountIdStorage extends LocalStorage<UUID, Account> {
+@Override
+protected Map<EntityProperty<Account, ?>, IndexType> getIndexes() {
+    return Map.of(
+            AccountProperty.EMAIL, IndexType.BTREE,
+            AccountProperty.USERNAME, IndexType.BTREE,
+            AccountProperty.DISPLAY_NAME, IndexType.GIN_TRGM
+    );
+}
+```
+
+| Type | Index | Use |
+|---|---|---|
+| `BTREE` | B-tree | Equality, ranges and ordering — the right choice for almost every column |
+| `GIN_TRGM` | GIN with trigram operators | Substring and similarity search, the kind a `LIKE '%term%'` performs |
+| `BRIN` | Block range | Range scans on a large append-only table whose values correlate with physical order; cannot serve an ordering |
+
+Index names follow `idx_<table>_<column>`. The `pg_trgm` extension is installed by the driver before any index is created.
+
+---
+
+## Batch Queue
+
+Every write goes through the `BatchQueue`. Nothing reaches the database at the moment a repository method is called.
+
+Writes land in a map keyed by table and identifier, so a burst of edits to one entity collapses into a single statement. A scheduled thread drains that map on a fixed interval, sorting by arrival order, splitting into chunks, and committing each chunk in one transaction. Within a transaction, runs of identical SQL execute as a single JDBC batch.
+
+```java
+final BatchQueueSettings settings = new BatchQueueSettings();
+settings.setFlushIntervalMillis(500L);
+settings.setChunkSize(1_000);
+```
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `chunkSize` | `500` | Maximum writes per transaction |
+| `flushIntervalMillis` | `1000` | Delay between flushes, and the worst-case window of writes lost to a crash |
+| `shutdownTimeoutSeconds` | `5` | How long shutdown waits for the flush thread |
+| `writeWarnMillis` | `50` | Warn past this per group of same-shape statements |
+| `commitWarnBaseMillis` | `150` | Fixed part of the commit warning threshold |
+| `commitWarnPerWriteMillis` | `1` | Per-write part, added once for each write in the chunk |
+
+The commit threshold scales with the write count deliberately — a commit costs a fixed fsync plus per-statement time, so a fixed ceiling would warn about a large chunk simply for being large.
+
+| Behaviour | Detail |
+|---|---|
+| **Coalescing** | One pending entry per entity; a newer write merges into the pending one |
+| **Ordering** | Arrival sequence stamped on first queue and preserved across merges |
+| **Failure** | A chunk that throws is logged and skipped; later chunks still commit |
+| **Shutdown** | Scheduler stopped, then one final drain; registered as a JVM shutdown hook and idempotent |
+
+---
+
+## Storage
+
+`Storage<Key, Value>` is the shared contract for both cache tiers, so a storage can be swapped between local and distributed without touching the calling code. Subclasses supply `index` and `unIndex` to decide which key an entity is stored under, plus `getTTL`.
+
+`reIndex(value, previousKey)` is part of that contract. When the value a storage keys on changes — an account's email being updated — the entity must be moved, or it stays reachable under the stale key until the entry expires. The entity is passed in already holding its new value, with the old key supplied separately because it can no longer be derived.
+
+### LocalStorage
+
+`ConcurrentHashMap`-backed, keyed by whatever the subclass indexes on.
+
+```java
+public class AccountIdLocalStorage extends LocalStorage<UUID, Account> {
+
+    @Override
+    public Duration getTTL() {
+        return Duration.ofMinutes(5);
+    }
 
     @Override
     public void index(final Account account) {
-        this.put(account.getId(), account);  // permanent
+        this.put(account.getId(), account);
     }
 
     @Override
@@ -235,387 +425,248 @@ public class AccountIdStorage extends LocalStorage<UUID, Account> {
 }
 ```
 
+Override `resolveKey` to normalise keys, so lookups match regardless of the caller's casing:
+
 ```java
-public class SessionTokenStorage extends LocalStorage<String, Session> {
-
-    @Override
-    public void index(final Session session) {
-        this.put(session.getToken(), session, Duration.ofMinutes(30));  // expires in 30 minutes
-    }
-
-    @Override
-    public void unIndex(final Session session) {
-        this.remove(session.getToken());
-    }
+@Override
+public String resolveKey(final String key) {
+    return key.toUpperCase(Locale.ROOT);
 }
 ```
 
-#### Cache
+Entries expire by the storage's TTL, applied on write; reads do not extend it. There is no background scheduler — expired entries are dropped when read, and a full sweep runs every 100 operations.
 
-The `Cache<Value>` wrapper holds the stored value alongside its TTL and creation timestamp:
-
-```java
-@AllArgsConstructor
-@Getter
-public class Cache<Value> implements ICache {
-
-    private final Value value;
-    private final Duration ttl;
-    private final long systemTime = System.currentTimeMillis();
-
-    @Override
-    public boolean isValid() {
-        if (this.getTtl() == null) {
-            return true;  // permanent entry
-        }
-
-        return !(UtilTime.elapsed(this.getSystemTime(), this.getTtl().toMillis()));
-    }
-}
-```
-
-| Field | Purpose |
-|---|---|
-| `value` | The stored object |
-| `ttl` | Time-to-live duration, or `null` for permanent entries |
-| `systemTime` | Millisecond timestamp captured at construction via `System.currentTimeMillis()` |
-| `isValid()` | Returns `true` if the TTL is `null` (permanent) or the elapsed time since creation has not exceeded the TTL |
+`reIndex(value, previousKey)` moves an entity when the value it is keyed on changes, so it is not left reachable under the stale key.
 
 ### RedisStorage
 
-Jedis-backed distributed storage with native Redis TTL via `SETEX`. Keys are automatically prefixed with a configurable namespace to avoid collisions. The `Value` type is resolved at runtime via `UtilGeneric` — no need to pass the class explicitly.
-
-**Key format:** `{redisKey}:{key}` — e.g. `session:token:abc123def456`
-
-**Operations:**
-
-| Method | Redis Command |
-|---|---|
-| `put` | `SETEX` |
-| `remove` | `DEL` |
-| `get` | `GET` + Gson deserialization |
-| `contains` | `EXISTS` |
-| `getKeys` | `SCAN` with prefix stripping |
-| `getValues` | `SCAN` + `MGET` batch retrieval |
-| `getSize` | `SCAN` count |
-| `flush` | `SCAN` + batch `DEL` |
-
-All scan-based operations use `SCAN` with a batch count of 100 instead of `KEYS` to avoid blocking the Redis server.
+Lettuce-backed and shared across every instance pointing at the same Redis. Keys are prefixed with a namespace, and each namespace keeps its own Redis set of member keys — that index is what makes `keys()`, `values()` and `size()` possible without a `SCAN`.
 
 ```java
-public class SessionTokenRedisStorage extends RedisStorage<Session> {
+public class AccountIdRedisStorage extends RedisStorage<Account> {
 
-    public SessionTokenRedisStorage(final RedisDatabaseDriver redisDatabaseDriver) {
-        super(redisDatabaseDriver, "session:token");
+    public AccountIdRedisStorage(final MyRedisDriver redisDriver) {
+        super(redisDriver, "account:id");
     }
 
     @Override
-    public void index(final Session session) {
-        this.put(session.getToken(), session, Duration.ofMinutes(30));
+    public Duration getTTL() {
+        return Duration.ofMinutes(30);
     }
 
     @Override
-    public void unIndex(final Session session) {
-        this.remove(session.getToken());
+    public void index(final Account account) {
+        this.put(account.getId().toString(), account);
+    }
+
+    @Override
+    public void unIndex(final Account account) {
+        this.remove(account.getId().toString());
+    }
+
+    @Override
+    protected String serialize(final Account account) {
+        return GSON.toJson(account);
+    }
+
+    @Override
+    protected Account deserialize(final String value) {
+        return GSON.fromJson(value, Account.class);
     }
 }
 ```
 
-### Local vs Redis Storage
+**Key format:** `{namespace}:{key}` — e.g. `account:id:8f14e45f-...`, with the namespace index at `{namespace}:__index`.
+
+Redis expires individual entries but cannot remove them from a set, so every read that misses prunes the key from the index as it goes.
+
+`reIndex` matters more here than on the local tier — a stale Redis key serves the old entity to every server on the network, not just the one that wrote it.
+
+### Local vs Redis
 
 | | LocalStorage | RedisStorage |
 |---|---|---|
-| **Backing store** | `ConcurrentHashMap` | Redis via Jedis |
-| **TTL mechanism** | `Cache` wrapper with lazy eviction + batched background sweep | Native Redis `SETEX` |
+| **Backing store** | `ConcurrentHashMap` | Redis via Lettuce |
+| **TTL mechanism** | `CacheEntry` with absolute expiry | Native `SET ... PX` |
 | **Key type** | Any object | `String` |
-| **Serialization** | None (stores Java objects directly) | Gson JSON |
+| **Serialisation** | None — stores Java objects directly | Subclass-supplied |
 | **Scope** | Single JVM instance | Shared across all instances |
-| **Eviction** | Lazy on `get()` + batched sweep (10k/pass, every 60s) | Handled by Redis automatically |
+| **Eviction** | Lazy on read, plus a sweep every 100 operations | Handled by Redis |
 | **Use case** | Hot data, same-instance caching | Distributed caching, cross-instance state |
 
 ---
 
-## Filter-Based Write Matching
+## Lookup Provider
 
-By default, all write operations (save, update, delete) match documents by their `_id` field. Override `getFiltersByDomain` in your repository to match on a compound set of fields instead. This enables patterns where uniqueness is defined by a combination of fields rather than a single UUID.
+`LookupProvider` solves two problems at once: tier order, and the stampede.
 
-### Example: One Wishlist Entry Per User Per Product
+A lookup tries local storage, then Redis, then the database, caching whatever it finds on the way back. While that is happening, the lookup is registered in an in-flight map — so a hundred callers asking for the same uncached entity produce one query, not a hundred. The first caller does the work and the rest wait on its result.
 
-A user can wishlist many products, but only once per product. Saving the same combination again updates the existing entry (e.g. refreshing the timestamp) rather than creating a duplicate:
+Every method exists in both forms, and both share the same in-flight registration:
 
-```java
-@Component
-public class WishlistRepository extends AbstractRepository<WishlistEntry, WishlistProperty> {
+| Method | Returns |
+|---|---|
+| `lookupEntitySynchronously` | `Optional<Entity>`, blocking |
+| `lookupEntityAsynchronously` | `CompletableFuture<Optional<Entity>>` |
+| `lookupAllValuesSynchronously` | `List<Entity>`, blocking |
+| `lookupAllValuesAsynchronously` | `CompletableFuture<List<Entity>>` |
 
-    public WishlistRepository(final DatabaseDriver databaseDriver) {
-        super(databaseDriver, "Shop", "Wishlists");
-    }
+Work runs on virtual threads, which suits blocking JDBC and Redis calls and means a synchronous caller waiting inside a lookup cannot starve a fixed pool.
 
-    @Override
-    public List<Filter> getFiltersByDomain(final WishlistEntry entry) {
-        return List.of(
-                Filter.eq(WishlistProperty.USER_ID.name(), entry.getUserId()),
-                Filter.eq(WishlistProperty.PRODUCT_ID.name(), entry.getProductId())
-        );
-    }
+Keys are namespaced so an identifier lookup and an email lookup never collide, and string keys are uppercased so callers differing only in casing still share one lookup.
 
-    @Override
-    public void registerIndexes() {
-        this.addIndex(new Index()
-                .on(WishlistProperty.USER_ID.name(), SortDirection.ASCENDING)
-                .on(WishlistProperty.PRODUCT_ID.name(), SortDirection.ASCENDING)
-                .unique()
-        );
-    }
-}
-```
-
-When `save(entry)` is called, the driver matches on `USER_ID + PRODUCT_ID` instead of `_id`:
-- **If a document with that combination exists** — its fields are updated
-- **If no document matches** — a new document is inserted with a generated `_id`
-
-This works identically on both backends:
-- **MongoDB** — the filter list is compiled into a compound `Filters.and(...)` used as the match condition on the `UpdateOneModel` with upsert
-- **MySQL** — `INSERT ... ON DUPLICATE KEY UPDATE` resolves conflicts via the compound unique index declared in `registerIndexes()`
-
-### Example: One Enrolment Per Student Per Course
-
-A student can enrol in many courses, but only once per course. Subsequent saves update the enrolment status rather than duplicating:
-
-```java
-@Component
-public class EnrolmentRepository extends AbstractRepository<Enrolment, EnrolmentProperty> {
-
-    public EnrolmentRepository(final DatabaseDriver databaseDriver) {
-        super(databaseDriver, "University", "Enrolments");
-    }
-
-    @Override
-    public List<Filter> getFiltersByDomain(final Enrolment enrolment) {
-        return List.of(
-                Filter.eq(EnrolmentProperty.STUDENT_ID.name(), enrolment.getStudentId()),
-                Filter.eq(EnrolmentProperty.COURSE_ID.name(), enrolment.getCourseId())
-        );
-    }
-
-    @Override
-    public void registerIndexes() {
-        this.addIndex(new Index()
-                .on(EnrolmentProperty.STUDENT_ID.name(), SortDirection.ASCENDING)
-                .on(EnrolmentProperty.COURSE_ID.name(), SortDirection.ASCENDING)
-                .unique()
-        );
-    }
-}
-```
-
-Each student has one enrolment per course. Calling `save(enrolment)` upserts by the compound key, and `delete(enrolment)` removes that specific enrolment without affecting the student's other courses.
-
-### When to Use
-
-| Pattern | `getFiltersByDomain` | Example |
-|---|---|---|
-| One doc per entity (default) | Not overridden — matches on `_id` | Accounts, Products, Orders |
-| One doc per combination | Returns compound filters | Wishlists (user + product), Enrolments (student + course), Subscriptions (user + plan) |
-
-**Important:** When using filter-based matching, always declare a matching compound unique index in `registerIndexes()`. On MongoDB the filters handle the match directly, but on MySQL the `ON DUPLICATE KEY UPDATE` mechanism relies on the unique index to detect conflicts.
+`lookupAllValues` takes both a predicate and an equivalent jOOQ condition — one is applied in memory to the cached entities, the other in SQL. Identifiers already found in a cache are excluded from the query, so the database only returns what the caches missed, and the merged result is deduplicated by identifier.
 
 ---
 
 ## Driver Configuration
 
-### MongoDB
+### PostgreSQL
+
+`DatabaseDriver` is abstract so you can subclass it and annotate the subclass for your own framework, keeping the library free of any framework's annotations. The subclass builds its own `HikariConfig` from wherever your application keeps configuration.
 
 ```java
-MongoClientSettings settings = MongoClientSettings.builder()
-        .applyConnectionString(new ConnectionString("mongodb://localhost:27017"))
-        .build();
+@Component
+public class MyDatabaseDriver extends DatabaseDriver {
 
-DatabaseDriver driver = new MongoDatabaseDriver(
-        settings,                     // client settings
-        100,                          // batch size
-        Duration.ofSeconds(5)         // flush interval (Duration.ZERO for instant)
-);
-
-driver.connect();
+    public MyDatabaseDriver(final DatabaseConfig databaseConfig) {
+        super(databaseConfig.toHikariConfig(), new BatchQueueSettings());
+    }
+}
 ```
 
-All writes produce `WriteModel` instances collected by the `BatchQueue`. On flush, operations are grouped by `database.collection` and executed as a single `bulkWrite` per collection — one round trip regardless of batch size.
-
-### MySQL
+The driver, every repository and every manager are components — the container builds the graph, and each repository registers itself with the driver as it is constructed.
 
 ```java
-HikariConfig config = new HikariConfig();
-config.setJdbcUrl("jdbc:mysql://localhost:3306");
-config.setUsername("root");
-config.setPassword("password");
+@Repository
+public class AccountRepository extends EntityRepository<Account> {
 
-DatabaseDriver driver = new MySqlDatabaseDriver(
-        config,                       // HikariCP configuration
-        100,                          // batch size
-        Duration.ofSeconds(5)         // flush interval (Duration.ZERO for instant)
-);
-
-driver.connect();
+    public AccountRepository(final MyDatabaseDriver databaseDriver) {
+        super(databaseDriver, Account.class, "Accounts");
+    }
+}
 ```
 
-HikariCP connection pool with prepared statement caching and server-side prepared statements. Writes are grouped by database and executed within a single transaction per group. Tables and databases are created automatically on first write.
+`connect()` is called once the container has finished wiring — from a startup listener, an `@PostConstruct`, or your plugin's enable:
+
+```java
+@Component
+@RequiredArgsConstructor
+public class DatabaseInitializer {
+
+    private final MyDatabaseDriver databaseDriver;
+    private final MyRedisDriver redisDriver;
+
+    @PostConstruct
+    public void initialize() {
+        this.redisDriver.connect();
+        this.databaseDriver.connect();
+    }
+
+    @PreDestroy
+    public void terminate() {
+        this.databaseDriver.disconnect();
+        this.redisDriver.disconnect();
+    }
+}
+```
+
+`connect()` opens the pool, builds the jOOQ context and batch queue, installs `pg_trgm`, then creates and migrates every registered repository's table and indexes. That ordering is why it runs after the container has constructed the repositories rather than as part of the driver's own construction.
+
+Two pgjdbc properties are applied automatically:
+
+| Property | Reason |
+|---|---|
+| `stringtype=unspecified` | Lets Postgres coerce string binds into `jsonb` columns |
+| `reWriteBatchedInserts=true` | Folds a batch of identical inserts into one multi-row statement |
+
+`disconnect()` drains the batch queue before closing the pool, in that order — closing the pool first would lose every queued write.
 
 ### Redis
 
 ```java
-RedisDatabaseDriver redisDriver = new RedisDatabaseDriver(
-        new JedisPoolConfig(),        // pool configuration
-        "localhost",                  // host
-        6379,                         // port
-        "password"                    // password
-);
+@Component
+public class MyRedisDriver extends RedisDriver {
 
-redisDriver.connect();
-```
-
-Jedis connection pool with configurable pool settings, host, port, and password. Resource management is handled via `useResource` and `getResource` helpers that automatically acquire and release connections:
-
-```java
-// Fire-and-forget write
-redisDriver.useResource(jedis -> jedis.set("key", "value"));
-
-// Read with return value
-String value = redisDriver.getResource(jedis -> jedis.get("key"));
-```
-
----
-
-## Filter System
-
-Build filters with the fluent `FilterBuilder` API. All filters are combined with AND semantics and translate to native queries on any backend:
-```java
-// Simple filter
-List<Filter> filters = FilterBuilder.create()
-        .equals(AccountProperty.USERNAME.name(), "Trae")
-        .build();
-
-// Complex filter
-List<Filter> filters = FilterBuilder.create()
-        .equals(PlayerProperty.ACTIVE.name(), true)
-        .greaterThan(PlayerProperty.KILLS.name(), 10)
-        .regex(PlayerProperty.EMAIL.name(), ".*@gmail\\.com$")
-        .in(PlayerProperty.STATUS.name(), List.of("ONLINE", "AWAY"))
-        .build();
-
-// With query options (sort, limit, skip)
-QueryOptions options = QueryOptions.of(filters)
-        .sort(PlayerProperty.CREATED_AT.name(), SortDirection.DESCENDING)
-        .limit(10)
-        .skip(20);
-
-List<Player> players = playerRepository.findManySynchronously(options);
-```
-
-**Supported operators:**
-
-| Operator | MongoDB | MySQL |
-|---|---|---|
-| EQUALS | `$eq` | `= ?` |
-| NOT_EQUALS | `$ne` | `!= ?` |
-| GREATER_THAN | `$gt` | `> ?` |
-| GREATER_THAN_OR_EQUALS | `$gte` | `>= ?` |
-| LESS_THAN | `$lt` | `< ?` |
-| LESS_THAN_OR_EQUALS | `$lte` | `<= ?` |
-| IN | `$in` | `IN (?, ?, ...)` |
-| NOT_IN | `$nin` | `NOT IN (?, ?, ...)` |
-| EXISTS | `$exists` | `IS [NOT] NULL` |
-| REGEX | `$regex` | `REGEXP ?` |
-
----
-
-## Index Declaration
-
-Declare indexes in `registerIndexes()` using the fluent `.on()` API. Indexes are applied identically across MongoDB and MySQL:
-```java
-@Override
-public void registerIndexes() {
-    // Single unique index
-    this.addIndex(new Index().on(AccountProperty.EMAIL.name(), SortDirection.ASCENDING).unique());
-
-    // Single descending index
-    this.addIndex(new Index().on(ProductProperty.CREATED_AT.name(), SortDirection.DESCENDING));
-
-    // Compound index
-    this.addIndex(new Index()
-            .on(ProductProperty.CATEGORY.name(), SortDirection.ASCENDING)
-            .on(ProductProperty.AVAILABLE.name(), SortDirection.ASCENDING)
-            .on(ProductProperty.PRICE.name(), SortDirection.DESCENDING)
-    );
-
-    // Compound index with ownership
-    this.addIndex(new Index()
-            .on(OrderProperty.CUSTOMER_ID.name(), SortDirection.ASCENDING)
-            .on(OrderProperty.PLACED_AT.name(), SortDirection.DESCENDING)
-    );
+    public MyRedisDriver(final RedisConfig redisConfig) {
+        super(redisConfig.getAddress(), redisConfig.getPort(), redisConfig.getPassword(), 500L);
+    }
 }
 ```
 
----
-
-## Batch Queue
-
-The `BatchQueue<T>` provides async batched execution with two modes:
-
-**Instant mode** (`Duration.ZERO`) — flushes immediately on every add. Suitable for real-time operations.
-
-**Batched mode** — collects operations and flushes when the queue reaches the configured batch size or on the scheduled interval. Suitable for high-throughput writes.
+Injected wherever Redis is needed — into a `RedisStorage`, or directly for pub/sub. Its `connect()` runs alongside the database driver's, before anything touches it.
 
 ```java
-// Instant — every write executes immediately (async)
-new BatchQueue<>(1, Duration.ZERO, this::executeBatch);
+@Component
+public class AccountIdRedisStorage extends RedisStorage<Account> {
 
-// Batched — flush every 5 seconds or when 100 operations are queued
-new BatchQueue<>(100, Duration.ofSeconds(5), this::executeBatch);
+    public AccountIdRedisStorage(final MyRedisDriver redisDriver) {
+        super(redisDriver, "account:id");
+    }
+}
 ```
 
-| Feature | Detail |
-|---|---|
-| **Thread safety** | `ReentrantLock` guarding all queue access |
-| **Async execution** | Fixed thread pool sized to `availableProcessors / 2` with daemon threads |
-| **Scheduled flush** | `ScheduledExecutorService` with configurable interval |
-| **Graceful shutdown** | Scheduler stop → synchronous final flush on calling thread → executor `awaitTermination` (30s) → force-kill |
-| **Idempotent shutdown** | `AtomicBoolean` guard — subsequent calls are no-ops |
-| **Post-shutdown rejection** | Operations added after shutdown are logged and rejected |
+Lettuce connections are thread-safe and multiplexed, so one connection serves every caller — there is no pool to size.
+
+```java
+// Direct command access
+final String value = redisDriver.synchronous().get("key");
+redisDriver.asynchronous().set("key", "value");
+
+// Grouping several commands
+redisDriver.useResource(commands -> {
+    commands.set("key", "value");
+    commands.expire("key", 60);
+});
+
+final String result = redisDriver.getResource(commands -> commands.get("key"));
+```
+
+The timeout is Lettuce's **command** timeout, not a connect timeout — every command waits at most that long before failing. Keep it short when commands run on a latency-sensitive thread.
+
+### Pub/Sub
+
+The Redis driver doubles as a message bus, which is how a multi-instance deployment keeps its caches honest:
+
+```java
+redisDriver.subscribe("account:invalidate", message -> accountManager.evictEntityById(UUID.fromString(message)));
+
+redisDriver.publish("account:invalidate", account.getId().toString());
+```
+
+The pub/sub connection is opened lazily on the first subscription and shared by every channel.
 
 ---
 
 ## Architecture
 
 ```
-Domain (Account)
-    ↕ DomainData (intermediate data carrier)
-    ↕ LinkedHashMap<String, Object> (raw key-value data)
-    ↕ AbstractRepository (mapping, delegation, index management, filter-based matching)
-    ↕ DatabaseDriver (backend-agnostic interface)
-    ↕ MongoDatabaseDriver / MySqlDatabaseDriver (native driver calls)
-    ↕ BatchQueue<T> (async batched execution)
+Entity (Account)
+    ↕ EntityProperty (column ↔ getter/setter/DataType, with optional ValueConverter)
+    ↕ EntityRepository (schema, reads, write queueing)
+    ↕ BatchQueue (coalescing, ordering, chunked transactions)
+    ↕ DatabaseDriver (HikariCP pool + jOOQ context)
 
-Storage<Key, Value> (unified caching interface)
-    ↕ LocalStorage (ConcurrentHashMap + Cache<Value> with per-key TTL)
-    ↕ RedisStorage (Jedis + SETEX with native Redis TTL)
+EntityHolder (AccountManager)
+    ↕ LookupProvider (tier walk + request coalescing)
+    ↕ LocalStorage (ConcurrentHashMap + CacheEntry TTL)
+    ↕ RedisStorage (Lettuce + native TTL + namespace index)
+    ↕ EntityRepository (database fallback)
 ```
 
 | Layer | Responsibility |
 |---|---|
-| **Domain** | Business entity with UUID identity and property-based field access |
-| **DomainProperty** | Enum defining the persistable fields on a domain |
-| **DomainData** | Intermediate carrier wrapping raw database results for typed access |
-| **AbstractRepository** | All CRUD, sync/async reads, exists, count, index management, domain mapping, filter-based write matching |
-| **DatabaseDriver** | Backend-agnostic interface for all database operations |
-| **MongoDatabaseDriver** | MongoDB implementation with `bulkWrite` batching and compound filter support |
-| **MySqlDatabaseDriver** | MySQL implementation with HikariCP, transactional batching, and unique index conflict resolution |
-| **RedisDatabaseDriver** | Redis implementation with Jedis connection pooling and `useResource`/`getResource` helpers |
-| **Storage** | Unified key-value storage interface with TTL support, `index`/`unIndex` for domain-aware subclassing |
-| **LocalStorage** | In-memory `ConcurrentHashMap` storage with `Cache` wrapper, lazy expiry, and batched eviction sweep |
-| **RedisStorage** | Distributed Redis storage with `SETEX` TTL, `SCAN`-based iteration, and `MGET` batch retrieval |
-| **Cache** | TTL wrapper holding value, duration, and creation timestamp with `isValid()` expiry check |
-| **BatchQueue** | Generic async batch queue with configurable flush strategy |
-| **FilterBuilder** | Fluent API for building universal filter conditions |
-| **QueryOptions** | Sort, limit, skip wrapper for paginated queries |
-| **Index** | Universal index definition with `.on()` chaining |
+| **Entity** | Business object with a UUID identity and an identifier constructor |
+| **EntityProperty** | Binds a column to its getter, setter and SQL type; registry of an entity's full column set |
+| **ValueConverter** | Bidirectional conversion between a Java type and its storage type |
+| **EntityRepository** | Schema management, reads, and write queueing for one entity type |
+| **PendingWrite** | One entity's queued write, merged in place as further writes arrive |
+| **BatchQueue** | Coalesces, orders, chunks and commits every deferred write |
+| **DatabaseDriver** | Owns the pool, jOOQ context and batch queue; runs schema setup on connect |
+| **RedisDriver** | Shared Lettuce connection, command helpers and pub/sub |
+| **Storage** | Unified key-value cache contract with TTL and `index`/`unIndex` |
+| **LocalStorage** | In-process cache with lazy eviction and a periodic sweep |
+| **RedisStorage** | Distributed cache with a per-namespace key index |
+| **CacheEntry** | Cached value paired with an absolute expiry |
+| **LookupProvider** | Tiered lookup with stampede protection, sync and async |
+| **EntityHolder** | Interface wiring a manager's repository, storages and lookup provider together |
