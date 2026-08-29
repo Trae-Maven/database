@@ -15,10 +15,10 @@ import java.time.Duration;
  * written as a subtraction so it stays correct across the counter's wrap.</p>
  *
  * <p>That reading doubles as the entry's age. A storage applies one time-to-live
- * to everything it holds, so {@link #getExpireAt()} is write time plus a
- * constant — ordering by it is ordering by write time, which is what lets a
- * bounded storage evict without carrying a second timestamp. Entries with no
- * time-to-live all share the sentinel, so they carry no age at all.</p>
+ * to everything it holds, so {@link #expireAt} is write time plus a constant —
+ * ordering by it is ordering by write time, which is what lets a bounded storage
+ * evict without carrying a second timestamp. Entries with no time-to-live all
+ * share the sentinel, so they carry no age at all.</p>
  *
  * <p>Entries are immutable — a refreshed value replaces the whole entry, which
  * is what keeps expiry checks free of races.</p>
