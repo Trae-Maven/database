@@ -13,15 +13,31 @@ import java.util.Set;
  * apply a time-to-live from {@link #getTTL()} and treat expired entries as
  * absent.</p>
  *
- * <p>{@link #index(Object)} and {@link #unIndex(Object)} let a subclass decide
- * which key an entity is stored under — an identifier storage keys on the id, an
- * email storage on the email — so one entity can sit in several storages at
- * once.</p>
+ * <p>What a storage holds and what it is keyed by are separate from the entity
+ * it belongs to, which is why there are three type parameters. A primary storage
+ * keys an entity on its identifier and stores the entity itself, so {@code Value}
+ * and {@code IndexValue} coincide. A secondary storage keys on something mutable
+ * — an email, a username — and stores only the identifier, leaving one copy of
+ * the entity in the primary storage for every lookup path to share. There
+ * {@code Value} is the identifier and {@code IndexValue} is still the entity,
+ * since {@link #index(Object)} needs the whole thing to derive both sides of the
+ * mapping.</p>
  *
- * @param <Key>   the key type entries are stored under
- * @param <Value> the cached value type
+ * <p>{@link #index(Object)} and {@link #unIndex(Object)} are where that
+ * derivation lives: given an entity, a subclass decides the key it belongs under
+ * and the value to store there, so one entity can be reachable through several
+ * storages at once.</p>
+ *
+ * <p>{@link #resolveKey(Object)} normalises keys on both sides of every
+ * operation, so a storage keyed on something case-insensitive must override it
+ * rather than relying on callers to pass a consistent form.</p>
+ *
+ * @param <Key>        the key type entries are stored under
+ * @param <Value>      the type held under that key — the entity itself, or an
+ *                     identifier pointing at it
+ * @param <IndexValue> the entity type the index rules operate on
  */
-public interface Storage<Key, Value> {
+public interface Storage<Key, Value, IndexValue> {
 
     /**
      * Stores a value under the given key, replacing any existing entry and
@@ -86,10 +102,10 @@ public interface Storage<Key, Value> {
     /**
      * Moves an entity from an old key to its current one.
      *
-     * @param value       the entity in its updated state
-     * @param previousKey the key the entity was stored under before the change
+     * @param indexValue  the entity in its updated state
+     * @param previousKey the key it was stored under before the change
      */
-    void reIndex(final Value value, final Key previousKey);
+    void reIndex(final IndexValue indexValue, final Key previousKey);
 
     /**
      * Returns how long an entry lives after being written.
@@ -99,16 +115,32 @@ public interface Storage<Key, Value> {
     Duration getTTL();
 
     /**
-     * Stores an entity under whichever key this storage is keyed by.
+     * Normalises a key before it is stored or looked up.
      *
-     * @param value the entity to index
+     * <p>Returns the key unchanged by default. Override to make lookups
+     * case-insensitive or otherwise forgiving — applied on writes as well as
+     * reads, so an entity indexed under its raw form is still found by a caller
+     * using a different casing.</p>
+     *
+     * @param key the key as supplied
+     * @return the key to actually store or look up under
      */
-    void index(final Value value);
+    default Key resolveKey(final Key key) {
+        return key;
+    }
+
+    /**
+     * Stores an entity under whichever key this storage is keyed by, deriving
+     * both the key and the stored value from it.
+     *
+     * @param indexValue the entity to index
+     */
+    void index(final IndexValue indexValue);
 
     /**
      * Removes an entity from this storage using its current key.
      *
-     * @param value the entity to remove
+     * @param indexValue the entity to remove
      */
-    void unIndex(final Value value);
+    void unIndex(final IndexValue indexValue);
 }

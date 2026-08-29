@@ -2,7 +2,9 @@ package io.github.trae.database.lookup;
 
 import io.github.trae.database.entity.EntityHolder;
 import io.github.trae.database.repository.EntityRepository;
+import io.github.trae.database.storage.LocalEntityReferenceIdStorage;
 import io.github.trae.database.storage.LocalStorage;
+import io.github.trae.database.storage.RedisEntityReferenceIdStorage;
 import io.github.trae.database.storage.RedisStorage;
 import io.github.trae.utilities.UtilString;
 import io.github.trae.utilities.objects.consumer.Consumer;
@@ -40,6 +42,12 @@ import java.util.stream.Stream;
  * the lookup's key and does the work; the rest find that future and wait on
  * it.</p>
  *
+ * <p>Lookups come in two shapes. An identifier lookup resolves straight to the
+ * entity. A lookup by anything else — email, username — resolves to an
+ * identifier through {@link #lookupIdAsynchronously}, and the caller feeds that
+ * into the identifier lookup, so one cached copy of the entity serves every path
+ * to it and each leg coalesces on its own.</p>
+ *
  * <p>Every method exists in both forms. The asynchronous one returns immediately
  * with a future, and the synchronous one blocks on that same future — so both
  * kinds of caller share one in-flight lookup rather than duplicating it. Work
@@ -47,8 +55,11 @@ import java.util.stream.Stream;
  * synchronous caller waiting inside a lookup cannot starve a fixed pool.</p>
  *
  * <p>Keys are namespaced, so an identifier lookup and an email lookup for the
- * same entity never collide, and string keys are uppercased so callers differing
- * only in casing still share one lookup.</p>
+ * same entity never collide, and string keys are uppercased before being used as
+ * an in-flight key so callers differing only in casing still share one lookup.
+ * That uppercasing is for matching callers against each other and nothing else —
+ * each tier is handed the caller's key and applies its own {@code resolveKey} to
+ * decide what it actually reads or writes under.</p>
  *
  * @param <Entity> the entity type this provider resolves
  * @see EntityHolder
@@ -66,6 +77,11 @@ public class LookupProvider<Entity extends io.github.trae.database.entity.Entity
      * In-flight single-entity lookups, by namespace then key.
      */
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, CompletableFuture<Optional<Entity>>>> singleInFlightMap = new ConcurrentHashMap<>();
+
+    /**
+     * In-flight identifier lookups, by namespace then key.
+     */
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, CompletableFuture<Optional<UUID>>>> idInFlightMap = new ConcurrentHashMap<>();
 
     /**
      * In-flight multi-entity lookups, by namespace then key.
@@ -93,7 +109,7 @@ public class LookupProvider<Entity extends io.github.trae.database.entity.Entity
      * @param databaseEntityOptionalFunction the database fallback
      * @return the entity, or empty if no tier holds it
      */
-    public <Key> Optional<Entity> lookupEntitySynchronously(final String namespace, final Key key, final LocalStorage<Key, Entity> localStorage, final RedisStorage<Entity> redisStorage, final Consumer<Entity> storageAddConsumer, final Function<Key, Optional<Entity>> databaseEntityOptionalFunction) {
+    public <Key> Optional<Entity> lookupEntitySynchronously(final String namespace, final Key key, final LocalStorage<Key, Entity, Entity> localStorage, final RedisStorage<Entity, Entity> redisStorage, final Consumer<Entity> storageAddConsumer, final Function<Key, Optional<Entity>> databaseEntityOptionalFunction) {
         return this.joinSynchronously(this.lookupEntityAsynchronously(namespace, key, localStorage, redisStorage, storageAddConsumer, databaseEntityOptionalFunction));
     }
 
@@ -102,6 +118,11 @@ public class LookupProvider<Entity extends io.github.trae.database.entity.Entity
      *
      * <p>An invalid namespace or key completes immediately with empty rather than
      * scheduling work.</p>
+     *
+     * <p>The in-flight key is uppercased, so a namespace served by a
+     * case-sensitive storage would coalesce two callers that should not share a
+     * lookup. Every storage keyed on text is case-insensitive; identifiers render
+     * one way regardless.</p>
      *
      * @param <Key>                          the lookup key type
      * @param namespace                      distinguishes this lookup from others
@@ -116,15 +137,12 @@ public class LookupProvider<Entity extends io.github.trae.database.entity.Entity
      * @param databaseEntityOptionalFunction the database fallback
      * @return a future completing with the entity, or with empty
      */
-    public <Key> CompletableFuture<Optional<Entity>> lookupEntityAsynchronously(final String namespace, final Key key, final LocalStorage<Key, Entity> localStorage, final RedisStorage<Entity> redisStorage, final Consumer<Entity> storageAddConsumer, final Function<Key, Optional<Entity>> databaseEntityOptionalFunction) {
+    public <Key> CompletableFuture<Optional<Entity>> lookupEntityAsynchronously(final String namespace, final Key key, final LocalStorage<Key, Entity, Entity> localStorage, final RedisStorage<Entity, Entity> redisStorage, final Consumer<Entity> storageAddConsumer, final Function<Key, Optional<Entity>> databaseEntityOptionalFunction) {
         if (UtilString.isEmpty(namespace) || (key == null || key instanceof final String keyString && UtilString.isEmpty(keyString))) {
             return CompletableFuture.completedFuture(Optional.empty());
         }
 
-        final String cleanKey = key instanceof final String keyString ? keyString.toUpperCase(Locale.ROOT) : key.toString();
-
-        return this.singleAsynchronously(namespace, cleanKey, () -> {
-            // Local check
+        return this.coalesceAsynchronously(this.singleInFlightMap, namespace, this.inFlightKey(key), () -> {
             if (localStorage != null) {
                 final Optional<Entity> localEntityOptional = localStorage.get(key);
                 if (localEntityOptional.isPresent()) {
@@ -132,27 +150,24 @@ public class LookupProvider<Entity extends io.github.trae.database.entity.Entity
                 }
             }
 
-            // Redis check
             if (redisStorage != null) {
-                final Optional<Entity> redisEntityOptional = redisStorage.get(cleanKey);
+                final Optional<Entity> redisEntityOptional = redisStorage.get(key.toString());
+
                 if (redisEntityOptional.isPresent()) {
                     if (storageAddConsumer != null) {
-                        storageAddConsumer.accept(redisEntityOptional.get());
+                        redisEntityOptional.ifPresent(storageAddConsumer::accept);
                     }
 
                     return redisEntityOptional;
                 }
             }
 
-            // Database check
             if (databaseEntityOptionalFunction != null) {
                 final Optional<Entity> databaseEntityOptional = databaseEntityOptionalFunction.apply(key);
 
-                databaseEntityOptional.ifPresent(databaseEntity -> {
-                    if (storageAddConsumer != null) {
-                        storageAddConsumer.accept(databaseEntity);
-                    }
-                });
+                if (storageAddConsumer != null) {
+                    databaseEntityOptional.ifPresent(storageAddConsumer::accept);
+                }
 
                 return databaseEntityOptional;
             }
@@ -162,65 +177,148 @@ public class LookupProvider<Entity extends io.github.trae.database.entity.Entity
     }
 
     /**
-     * Resolves every entity matching a filter across all tiers, blocking until
-     * complete.
+     * Resolves an identifier from a secondary key, blocking until it is
+     * available.
      *
-     * @param namespace          distinguishes this lookup from others on the same
-     *                           entity
-     * @param predicate          filters the cached entities
-     * @param condition          the equivalent condition for the database query
-     * @param idLocalStorage     the local tier, or {@code null} to skip it
-     * @param idRedisStorage     the Redis tier, or {@code null} to skip it
-     * @param storageAddConsumer caches entities found in the database
-     * @return the matching entities, deduplicated by identifier
+     * @param <Key>                      the lookup key type
+     * @param namespace                  distinguishes this lookup from others on
+     *                                   the same entity
+     * @param key                        the value to look up by
+     * @param localStorage               the local tier, or {@code null} to skip
+     *                                   it
+     * @param redisStorage               the Redis tier, or {@code null} to skip
+     *                                   it
+     * @param databaseIdOptionalFunction the database fallback
+     * @return the identifier, or empty if no tier holds it
      */
-    public List<Entity> lookupAllValuesSynchronously(final String namespace, final Predicate<Entity> predicate, final Condition condition, final LocalStorage<UUID, Entity> idLocalStorage, final RedisStorage<Entity> idRedisStorage, final Consumer<Entity> storageAddConsumer) {
-        return this.joinSynchronously(this.lookupAllValuesAsynchronously(namespace, predicate, condition, idLocalStorage, idRedisStorage, storageAddConsumer));
+    public <Key> Optional<UUID> lookupIdSynchronously(final String namespace, final Key key, final LocalEntityReferenceIdStorage<Key, Entity> localStorage, final RedisEntityReferenceIdStorage<Entity> redisStorage, final Function<Key, Optional<UUID>> databaseIdOptionalFunction) {
+        return this.joinSynchronously(this.lookupIdAsynchronously(namespace, key, localStorage, redisStorage, databaseIdOptionalFunction));
     }
 
     /**
-     * Resolves every entity matching a filter across all tiers, without blocking
-     * the caller.
+     * Resolves an identifier from a secondary key without blocking the caller.
      *
-     * <p>The predicate and the condition must express the same rule — one is
-     * applied in memory to the cached entities, the other in SQL. Identifiers
-     * already found in a cache are excluded from the query, so the database only
-     * returns what the caches missed.</p>
+     * <p>The first leg of a lookup by email, username, or any other key the
+     * entity is reachable through. Feed the result into
+     * {@link EntityHolder#getEntityByIdAsynchronously(UUID)} for the entity
+     * itself.</p>
+     *
+     * <p>A database hit is written back to both tiers here rather than through a
+     * caller-supplied consumer, since the mapping is fully described by the key
+     * and the identifier — there is no entity to hand anywhere.</p>
+     *
+     * @param <Key>                      the lookup key type
+     * @param namespace                  distinguishes this lookup from others on
+     *                                   the same entity
+     * @param key                        the value to look up by
+     * @param localStorage               the local tier, or {@code null} to skip
+     *                                   it
+     * @param redisStorage               the Redis tier, or {@code null} to skip
+     *                                   it
+     * @param databaseIdOptionalFunction the database fallback
+     * @return a future completing with the identifier, or with empty
+     */
+    public <Key> CompletableFuture<Optional<UUID>> lookupIdAsynchronously(final String namespace, final Key key, final LocalEntityReferenceIdStorage<Key, Entity> localStorage, final RedisEntityReferenceIdStorage<Entity> redisStorage, final Function<Key, Optional<UUID>> databaseIdOptionalFunction) {
+        if (UtilString.isEmpty(namespace) || (key == null || key instanceof final String keyString && UtilString.isEmpty(keyString))) {
+            return CompletableFuture.completedFuture(Optional.empty());
+        }
+
+        return this.coalesceAsynchronously(this.idInFlightMap, namespace, this.inFlightKey(key), () -> {
+            if (localStorage != null) {
+                final Optional<UUID> localIdOptional = localStorage.get(key);
+                if (localIdOptional.isPresent()) {
+                    return localIdOptional;
+                }
+            }
+
+            if (redisStorage != null) {
+                final Optional<UUID> redisIdOptional = redisStorage.get(key.toString());
+
+                if (redisIdOptional.isPresent()) {
+                    if (localStorage != null) {
+                        redisIdOptional.ifPresent(id -> localStorage.put(key, id));
+                    }
+
+                    return redisIdOptional;
+                }
+            }
+
+            if (databaseIdOptionalFunction != null) {
+                final Optional<UUID> databaseIdOptional = databaseIdOptionalFunction.apply(key);
+
+                databaseIdOptional.ifPresent(id -> {
+                    if (localStorage != null) {
+                        localStorage.put(key, id);
+                    }
+
+                    if (redisStorage != null) {
+                        redisStorage.put(key.toString(), id);
+                    }
+                });
+
+                return databaseIdOptional;
+            }
+
+            return Optional.empty();
+        });
+    }
+
+    /**
+     * Resolves every entity matching a filter, blocking until complete.
      *
      * @param namespace          distinguishes this lookup from others on the same
      *                           entity
      * @param predicate          filters the cached entities
      * @param condition          the equivalent condition for the database query
      * @param idLocalStorage     the local tier, or {@code null} to skip it
-     * @param idRedisStorage     the Redis tier, or {@code null} to skip it
+     * @param storageAddConsumer caches entities found in the database
+     * @return the matching entities, deduplicated by identifier
+     */
+    public List<Entity> lookupAllValuesSynchronously(final String namespace, final Predicate<Entity> predicate, final Condition condition, final LocalStorage<UUID, Entity, Entity> idLocalStorage, final Consumer<Entity> storageAddConsumer) {
+        return this.joinSynchronously(this.lookupAllValuesAsynchronously(namespace, predicate, condition, idLocalStorage, storageAddConsumer));
+    }
+
+    /**
+     * Resolves every entity matching a filter, without blocking the caller.
+     *
+     * <p>The predicate and the condition must express the same rule — one is
+     * applied in memory to the locally cached entities, the other in SQL.
+     * Identifiers already found locally are excluded from the query, so the
+     * database only returns what the cache missed.</p>
+     *
+     * <p>The Redis tier is deliberately not consulted: scraping it means reading
+     * and deserialising the entire namespace on every call, and every entity it
+     * would have supplied comes back from the query anyway.</p>
+     *
+     * <p>Coalescing keys on the rendered condition, so two callers filtering on
+     * different values do not share a lookup — which also means a filter over a
+     * high-cardinality column rarely coalesces at all.</p>
+     *
+     * @param namespace          distinguishes this lookup from others on the same
+     *                           entity
+     * @param predicate          filters the cached entities
+     * @param condition          the equivalent condition for the database query
+     * @param idLocalStorage     the local tier, or {@code null} to skip it
      * @param storageAddConsumer caches entities found in the database
      * @return a future completing with the matching entities, deduplicated by
      * identifier
      */
-    public CompletableFuture<List<Entity>> lookupAllValuesAsynchronously(final String namespace, final Predicate<Entity> predicate, final Condition condition, final LocalStorage<UUID, Entity> idLocalStorage, final RedisStorage<Entity> idRedisStorage, final Consumer<Entity> storageAddConsumer) {
+    public CompletableFuture<List<Entity>> lookupAllValuesAsynchronously(final String namespace, final Predicate<Entity> predicate, final Condition condition, final LocalStorage<UUID, Entity, Entity> idLocalStorage, final Consumer<Entity> storageAddConsumer) {
         if (UtilString.isEmpty(namespace) || predicate == null || condition == null) {
             return CompletableFuture.completedFuture(Collections.emptyList());
         }
 
         return this.listAsynchronously(namespace, condition.toString(), () -> {
-            // Local scrape
             final List<Entity> localEntityList = idLocalStorage != null ? idLocalStorage.values().stream().filter(predicate).toList() : Collections.emptyList();
-            final Set<UUID> localEntityIdSet = localEntityList.stream().map(io.github.trae.database.entity.Entity::getId).collect(Collectors.toSet());
+            final Set<UUID> localEntityIdSet = localEntityList.stream().map(Entity::getId).collect(Collectors.toSet());
 
-            // Redis scrape
-            final List<Entity> redisEntityList = idRedisStorage != null ? idRedisStorage.values().stream().filter(predicate).toList() : Collections.emptyList();
-            final Set<UUID> redisEntityIdSet = redisEntityList.stream().map(io.github.trae.database.entity.Entity::getId).collect(Collectors.toSet());
+            final List<Entity> databaseEntityList = this.entityHolder.getRepository().findMany(localEntityIdSet.isEmpty() ? condition : condition.and(EntityRepository.IDENTIFIER_FIELD.notIn(localEntityIdSet)));
 
-            // Database scrape
-            final List<Entity> databaseEntityList = this.entityHolder.getRepository().findMany(localEntityIdSet.isEmpty() && redisEntityIdSet.isEmpty() ? condition : condition.and(EntityRepository.IDENTIFIER_FIELD.notIn(localEntityIdSet)).and(EntityRepository.IDENTIFIER_FIELD.notIn(redisEntityIdSet)));
+            if (storageAddConsumer != null) {
+                databaseEntityList.forEach(storageAddConsumer::accept);
+            }
 
-            databaseEntityList.forEach(databaseEntity -> {
-                if (storageAddConsumer != null) {
-                    storageAddConsumer.accept(databaseEntity);
-                }
-            });
-
-            return List.copyOf(Stream.of(localEntityList, redisEntityList, databaseEntityList).flatMap(List::stream).collect(Collectors.toMap(io.github.trae.database.entity.Entity::getId, entity -> entity, (first, second) -> first, LinkedHashMap::new)).values());
+            return List.copyOf(Stream.of(localEntityList, databaseEntityList).flatMap(List::stream).collect(Collectors.toMap(Entity::getId, entity -> entity, (first, second) -> first, LinkedHashMap::new)).values());
         });
     }
 
@@ -231,7 +329,7 @@ public class LookupProvider<Entity extends io.github.trae.database.entity.Entity
      * coalescing.</p>
      *
      * @param namespace the lookup namespace
-     * @param key       the lookup key, already normalised
+     * @param key       the in-flight key, already normalised
      * @param supplier  performs the lookup on a cache miss
      * @return a future completing with the supplier's result
      */
@@ -240,15 +338,38 @@ public class LookupProvider<Entity extends io.github.trae.database.entity.Entity
     }
 
     /**
+     * Runs an identifier supplier under stampede protection.
+     *
+     * @param namespace the lookup namespace
+     * @param key       the in-flight key, already normalised
+     * @param supplier  performs the lookup on a cache miss
+     * @return a future completing with the supplier's result
+     */
+    public CompletableFuture<Optional<UUID>> idAsynchronously(final String namespace, final String key, final Supplier<Optional<UUID>> supplier) {
+        return this.coalesceAsynchronously(this.idInFlightMap, namespace, key, supplier);
+    }
+
+    /**
      * Runs a multi-entity supplier under stampede protection.
      *
      * @param namespace the lookup namespace
-     * @param key       the lookup key, already normalised
+     * @param key       the in-flight key, already normalised
      * @param supplier  performs the lookup on a cache miss
      * @return a future completing with the supplier's result
      */
     public CompletableFuture<List<Entity>> listAsynchronously(final String namespace, final String key, final Supplier<List<Entity>> supplier) {
         return this.coalesceAsynchronously(this.listInFlightMap, namespace, key, supplier);
+    }
+
+    /**
+     * Normalises a key for use as an in-flight key, so callers differing only in
+     * casing share one lookup.
+     *
+     * @param key the key as supplied
+     * @return the key to coalesce on
+     */
+    private String inFlightKey(final Object key) {
+        return key instanceof final String keyString ? keyString.toUpperCase(Locale.ROOT) : key.toString();
     }
 
     /**
@@ -266,7 +387,7 @@ public class LookupProvider<Entity extends io.github.trae.database.entity.Entity
      * @param <T>         the lookup's result type
      * @param inFlightMap the map tracking lookups of this shape
      * @param namespace   the lookup namespace
-     * @param key         the lookup key
+     * @param key         the in-flight key
      * @param supplier    performs the lookup
      * @return a future completing with the result
      */
@@ -310,7 +431,7 @@ public class LookupProvider<Entity extends io.github.trae.database.entity.Entity
      * @param <T>               the lookup's result type
      * @param inFlightMap       the map tracking lookups of this shape
      * @param namespace         the lookup namespace
-     * @param key               the lookup key
+     * @param key               the in-flight key
      * @param completableFuture the future being retired
      */
     private <T> void release(final ConcurrentHashMap<String, ConcurrentHashMap<String, CompletableFuture<T>>> inFlightMap, final String namespace, final String key, final CompletableFuture<T> completableFuture) {

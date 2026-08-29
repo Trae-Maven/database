@@ -3,6 +3,7 @@ package io.github.trae.database.storage;
 import io.github.trae.database.storage.data.CacheEntry;
 import io.github.trae.utilities.UtilString;
 
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -24,15 +25,24 @@ import java.util.stream.Collectors;
  * nobody asks for in a quiet storage still gets collected eventually without a
  * scheduler.</p>
  *
+ * <p>A storage is unbounded unless {@link #getMaxSize()} is overridden. That
+ * suits a working set with a natural ceiling — the players on a server, say —
+ * but a public endpoint caches whatever gets requested, so a storage reachable
+ * that way wants a bound. A write is never refused: at capacity the storage
+ * sweeps expired entries first and, if that frees nothing, drops the entries
+ * closest to expiring.</p>
+ *
  * <p>Subclasses supply {@link #index(Object)} and {@link #unIndex(Object)} to
  * decide the key an entity is stored under, and may override
  * {@link #resolveKey(Object)} to normalise keys — uppercasing a name, trimming
  * a code — so lookups match regardless of the caller's casing.</p>
  *
- * @param <Key>   the key type entries are stored under
- * @param <Value> the cached value type
+ * @param <Key>        the key type entries are stored under
+ * @param <Value>      the type held under that key — the entity itself, or an
+ *                     identifier pointing at it
+ * @param <IndexValue> the entity type the index rules operate on
  */
-public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
+public abstract class LocalStorage<Key, Value, IndexValue> implements Storage<Key, Value, IndexValue> {
 
     /**
      * How many operations pass between full expiry sweeps.
@@ -54,7 +64,8 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
      * {@inheritDoc}
      *
      * <p>Invalid keys and null values are ignored. The entry's expiry is set from
-     * {@link #getTTL()} at write time.</p>
+     * {@link #getTTL()} at write time, and room is made first if the storage is
+     * at capacity.</p>
      */
     @Override
     public void put(final Key key, final Value value) {
@@ -68,6 +79,8 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
         if (value == null) {
             return;
         }
+
+        this.evictIfNecessary();
 
         this.map.put(resolvedValidKey, CacheEntry.of(value, this.getTTL()));
     }
@@ -145,6 +158,8 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
      */
     @Override
     public Set<Key> keys() {
+        this.cleanupIfNecessary();
+
         return this.map.entrySet().stream().filter(entry -> !entry.getValue().isExpired()).map(Map.Entry::getKey).collect(Collectors.toUnmodifiableSet());
     }
 
@@ -153,6 +168,8 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
      */
     @Override
     public List<Value> values() {
+        this.cleanupIfNecessary();
+
         return this.map.values().stream().filter(value -> !value.isExpired()).map(CacheEntry::getValue).toList();
     }
 
@@ -161,6 +178,8 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
      */
     @Override
     public long size() {
+        this.cleanupIfNecessary();
+
         return this.map.values().stream().filter(value -> !value.isExpired()).count();
     }
 
@@ -183,9 +202,21 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
      * in because it can no longer be derived from the entity.</p>
      */
     @Override
-    public void reIndex(final Value value, final Key previousKey) {
+    public void reIndex(final IndexValue indexValue, final Key previousKey) {
         this.remove(previousKey);
-        this.index(value);
+        this.index(indexValue);
+    }
+
+    /**
+     * Returns the most entries this storage holds before it starts evicting.
+     *
+     * <p>Zero, the default, means unbounded — correct where the working set has a
+     * natural ceiling, wrong where callers can ask for anything.</p>
+     *
+     * @return the entry cap, or {@code 0} for no cap
+     */
+    public int getMaxSize() {
+        return 0;
     }
 
     /**
@@ -199,16 +230,45 @@ public abstract class LocalStorage<Key, Value> implements Storage<Key, Value> {
     }
 
     /**
-     * Normalises a key before it is used.
+     * Makes room for one more entry when the storage is at
+     * {@link #getMaxSize()}.
      *
-     * <p>Returns the key unchanged by default. Override to make lookups
-     * case-insensitive or otherwise forgiving.</p>
+     * <p>Sweeps expired entries first, since those are free to lose. If the
+     * storage is still full every entry is live, so the ones closest to expiring
+     * go — which, since one time-to-live covers the whole storage, is also the
+     * oldest-written ones. That is insertion order rather than
+     * least-recently-used: {@link ConcurrentHashMap} does not track access
+     * order, and the bookkeeping to add it would cost more than the eviction
+     * quality is worth. A time-to-live is the real control over what this
+     * storage holds; the cap is the backstop.</p>
      *
-     * @param key the key as supplied
-     * @return the key to actually store or look up under
+     * <p>A storage with no time-to-live has no age to sort on, so its evictions
+     * fall in whatever order the map iterates.</p>
+     *
+     * <p>The check and the eviction are not atomic, so concurrent writers can
+     * overshoot the cap briefly. The next write pulls it back.</p>
      */
-    public Key resolveKey(final Key key) {
-        return key;
+    private void evictIfNecessary() {
+        final int maxSize = this.getMaxSize();
+
+        if (maxSize <= 0 || this.map.size() < maxSize) {
+            return;
+        }
+
+        this.cleanup();
+
+        final int excess = this.map.size() - maxSize + 1;
+        if (excess <= 0) {
+            return;
+        }
+
+        this.map.entrySet()
+                .stream()
+                .sorted(Comparator.comparingLong(entry -> entry.getValue().getExpireAt()))
+                .limit(excess)
+                .map(Map.Entry::getKey)
+                .toList()
+                .forEach(this.map::remove);
     }
 
     /**

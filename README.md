@@ -18,8 +18,9 @@ Database removes the boilerplate around persistence. Declare an entity's columns
 - **Tiered lookups** — `LookupProvider` walks local storage, then Redis, then the database, caching what it finds on the way back
 - **Request coalescing** — concurrent identical lookups share one piece of work instead of stampeding the database, with synchronous and asynchronous callers joining the same in-flight request
 - **Virtual thread execution** — lookups run on virtual threads, so blocking JDBC and Redis calls never occupy a platform thread or a fixed pool
-- **Local storage** — `ConcurrentHashMap`-backed cache with per-storage TTL, lazy eviction on read and a periodic sweep, with no background scheduler
-- **Redis storage** — Lettuce-backed distributed cache with native TTL, a per-namespace key index enabling iteration without `SCAN`, and `MGET` batch retrieval
+- **Local storage** — `ConcurrentHashMap`-backed cache with per-storage TTL, lazy eviction on read, a periodic sweep and an optional size cap, with no background scheduler
+- **Redis storage** — Lettuce-backed distributed cache with native TTL, a per-namespace key index enabling iteration without `SCAN`, chunked `MGET` retrieval and automatic eviction of values that no longer decode
+- **Reference storages** — a secondary key maps to an entity's identifier rather than a second copy of the entity, so one cached entity serves every path to it
 - **Redis pub/sub** — publish and subscribe on the same driver, for cross-server cache invalidation on a multi-instance deployment
 - **Framework-agnostic** — no Spring or dependency-injection annotations anywhere in the library; annotate your own classes for whichever container you use
 
@@ -196,6 +197,9 @@ public class AccountManager implements EntityHolder<Account, AccountRepository> 
     private final AccountIdLocalStorage idLocalStorage;
     private final AccountIdRedisStorage idRedisStorage;
 
+    private final AccountEmailLocalStorage emailLocalStorage;
+    private final AccountEmailRedisStorage emailRedisStorage;
+
     private final LookupProvider<Account> lookupProvider = new LookupProvider<>(this);
 
     @Override
@@ -219,24 +223,25 @@ final Optional<Account> accountOptional = accountManager.getEntityByIdSynchronou
 
 accountManager.getEntityByIdAsynchronously(id).thenAccept(accountOptional -> accountOptional.ifPresent(this::handle));
 
-// Existence across all three tiers, without building the entity
-final boolean exists = accountManager.isEntityById(id);
+// Existence is just the lookup you were going to run anyway
+final boolean exists = accountManager.getEntityByIdSynchronously(id).isPresent();
 ```
 
-Additional lookups follow the same shape with their own namespace, storage and repository fallback:
+There is no separate existence check, because a caller who has one almost always wants the entity a line later — and a lookup leaves it cached where a bare `EXISTS` would not. Call `repository.exists(id)` directly for the rare check that should not warm the caches.
+
+A lookup by anything other than the identifier runs in two legs — the secondary key resolves to an identifier, and the identifier resolves to the entity. `getEntityByKeySynchronously` and `getEntityByKeyAsynchronously` compose both, so a manager wraps them once per key it supports:
 
 ```java
 public Optional<Account> getEntityByEmailSynchronously(final String email) {
-    return this.getLookupProvider().lookupEntitySynchronously(
-            "email",
-            email,
-            this.emailLocalStorage,
-            this.emailRedisStorage,
-            this::cacheEntity,
-            this.getRepository()::findByEmail
-    );
+    return this.getEntityByKeySynchronously("email", email, this.emailLocalStorage, this.emailRedisStorage, this.getRepository()::findIdByEmail);
+}
+
+public CompletableFuture<Optional<Account>> getEntityByEmailAsynchronously(final String email) {
+    return this.getEntityByKeyAsynchronously("email", email, this.emailLocalStorage, this.emailRedisStorage, this.getRepository()::findIdByEmail);
 }
 ```
+
+Each leg coalesces on its own, so a hundred callers asking by email produce one email lookup and one identifier lookup between them — and the entity itself is cached once, under its identifier, however many keys point at it. The identifier leg usually hits local storage, so the second hop costs a map read rather than a round trip; a fully cold read is the case that pays for both.
 
 ---
 
@@ -397,9 +402,21 @@ The commit threshold scales with the write count deliberately — a commit costs
 
 ## Storage
 
-`Storage<Key, Value>` is the shared contract for both cache tiers, so a storage can be swapped between local and distributed without touching the calling code. Subclasses supply `index` and `unIndex` to decide which key an entity is stored under, plus `getTTL`.
+`Storage<Key, Value, IndexValue>` is the shared contract for both cache tiers, so a storage can be swapped between local and distributed without touching the calling code. Subclasses supply `index` and `unIndex` to decide which key an entity is stored under, plus `getTTL`.
 
-`reIndex(value, previousKey)` is part of that contract. When the value a storage keys on changes — an account's email being updated — the entity must be moved, or it stays reachable under the stale key until the entry expires. The entity is passed in already holding its new value, with the old key supplied separately because it can no longer be derived.
+Three type parameters, because what a storage holds is separate from the entity it belongs to:
+
+| Parameter | Meaning |
+|---|---|
+| `Key` | What entries are stored under — a `UUID`, an email, a username |
+| `Value` | What is held under that key — the entity itself, or an identifier pointing at it |
+| `IndexValue` | The entity the index rules operate on, always the entity |
+
+A primary storage keys an entity on its identifier and holds the entity, so `Value` and `IndexValue` coincide. A secondary storage keys on an email or a username and holds only the identifier — `index` still needs the whole entity to derive both sides of the mapping, which is why the third parameter exists.
+
+`reIndex(indexValue, previousKey)` is part of that contract. When the value a storage keys on changes — an account's email being updated — the entity must be moved, or it stays reachable under the stale key until the entry expires. The entity is passed in already holding its new value, with the old key supplied separately because it can no longer be derived.
+
+`resolveKey` normalises keys on both sides of every operation, so a storage keyed on something case-insensitive overrides it once rather than relying on callers to pass a consistent form.
 
 ### LocalStorage
 
@@ -407,7 +424,7 @@ The commit threshold scales with the write count deliberately — a commit costs
 
 ```java
 @Component
-public class AccountIdLocalStorage extends LocalStorage<UUID, Account> {
+public class AccountIdLocalStorage extends LocalStorage<UUID, Account, Account> {
 
     @Override
     public Duration getTTL() {
@@ -437,7 +454,16 @@ public String resolveKey(final String key) {
 
 Entries expire by the storage's TTL, applied on write; reads do not extend it. There is no background scheduler — expired entries are dropped when read, and a full sweep runs every 100 operations.
 
-`reIndex(value, previousKey)` moves an entity when the value it is keyed on changes, so it is not left reachable under the stale key.
+A storage is unbounded unless `getMaxSize()` is overridden, which suits a working set with a natural ceiling — the players on a server. A storage a public endpoint can reach caches whatever gets requested, so it wants a bound:
+
+```java
+@Override
+public int getMaxSize() {
+    return 50_000;
+}
+```
+
+A write is never refused. At capacity the storage sweeps expired entries first, and if that frees nothing it drops the entries closest to expiring — which, since one TTL covers the whole storage, is also the oldest-written ones. That is insertion order rather than least-recently-used: `ConcurrentHashMap` does not track access order, and the bookkeeping to add it would cost more than the eviction quality is worth. A TTL is the real control over what a storage holds; the cap is the backstop.
 
 ### RedisStorage
 
@@ -445,7 +471,7 @@ Lettuce-backed and shared across every instance pointing at the same Redis. Keys
 
 ```java
 @Component
-public class AccountIdRedisStorage extends RedisStorage<Account> {
+public class AccountIdRedisStorage extends RedisStorage<Account, Account> {
 
     public AccountIdRedisStorage(final MyRedisDriver redisDriver) {
         super(redisDriver, "account:id");
@@ -480,20 +506,80 @@ public class AccountIdRedisStorage extends RedisStorage<Account> {
 
 **Key format:** `{namespace}:{key}` — e.g. `account:id:8f14e45f-...`, with the namespace index at `{namespace}:__index`.
 
-Redis expires individual entries but cannot remove them from a set, so every read that misses prunes the key from the index as it goes.
+Redis expires individual entries but cannot remove them from a set, so the index outlives some of the entries it names. `keys()`, `values()` and `size()` prune as they go; a `get` or `contains` miss leaves the index alone, since the vast majority of misses are keys that were never cached and pruning each one would double the cost of every cold lookup.
+
+Those three methods read the whole namespace, in 512-key batches so no single command blocks Redis, and deserialise every value they find. They are proportional to the namespace size and belong in administrative paths, not on a per-request lookup.
+
+A value that will not deserialise — whether it throws or decodes to `null` — is treated as a miss and evicted rather than returned, so a schema change poisons nothing and nothing is left behind to fail the same way on the next read. The entity is simply refetched from the database and cached again in its new shape.
 
 `reIndex` matters more here than on the local tier — a stale Redis key serves the old entity to every server on the network, not just the one that wrote it.
+
+### Reference Storages
+
+A secondary key — an email, a username — maps to an entity's **identifier**, not to a second copy of the entity. `LocalEntityReferenceIdStorage` and `RedisEntityReferenceIdStorage` implement that mapping, leaving only `getKey` to write:
+
+```java
+@Component
+public class AccountEmailLocalStorage extends LocalEntityReferenceIdStorage<String, Account> {
+
+    @Override
+    public Duration getTTL() {
+        return Duration.ofMinutes(5);
+    }
+
+    @Override
+    public String resolveKey(final String key) {
+        return key.toUpperCase(Locale.ROOT);
+    }
+
+    @Override
+    protected String getKey(final Account account) {
+        return account.getEmail();
+    }
+}
+```
+
+```java
+@Component
+public class AccountEmailRedisStorage extends RedisEntityReferenceIdStorage<Account> {
+
+    public AccountEmailRedisStorage(final MyRedisDriver redisDriver) {
+        super(redisDriver, "account:email");
+    }
+
+    @Override
+    public Duration getTTL() {
+        return Duration.ofMinutes(30);
+    }
+
+    @Override
+    public String resolveKey(final String key) {
+        return key.toUpperCase(Locale.ROOT);
+    }
+
+    @Override
+    protected String getKey(final Account account) {
+        return account.getEmail();
+    }
+}
+```
+
+The Redis form serialises identifiers as their canonical string, so a malformed value can only come from something outside the class having written the key — and is evicted like any other value that will not decode.
+
+Storing the entity in each storage instead would mean a copy per key to keep in step on every write, and copies that drift apart the moment one is refreshed and another is not. The cost of the indirection is a second hop, which is a map lookup locally and usually a cache hit on the identifier leg.
+
+An entity with no key — an account with no email set — is skipped, since a null key is a no-op on both tiers.
 
 ### Local vs Redis
 
 | | LocalStorage | RedisStorage |
 |---|---|---|
 | **Backing store** | `ConcurrentHashMap` | Redis via Lettuce |
-| **TTL mechanism** | `CacheEntry` with absolute expiry | Native `SET ... PX` |
+| **TTL mechanism** | `CacheEntry` with a monotonic expiry | Native `SET ... PX` |
 | **Key type** | Any object | `String` |
 | **Serialisation** | None — stores Java objects directly | Subclass-supplied |
 | **Scope** | Single JVM instance | Shared across all instances |
-| **Eviction** | Lazy on read, plus a sweep every 100 operations | Handled by Redis |
+| **Eviction** | Lazy on read, a sweep every 100 operations, and an optional size cap | Handled by Redis, plus corrupt-value eviction on read |
 | **Use case** | Hot data, same-instance caching | Distributed caching, cross-instance state |
 
 ---
@@ -504,20 +590,32 @@ Redis expires individual entries but cannot remove them from a set, so every rea
 
 A lookup tries local storage, then Redis, then the database, caching whatever it finds on the way back. While that is happening, the lookup is registered in an in-flight map — so a hundred callers asking for the same uncached entity produce one query, not a hundred. The first caller does the work and the rest wait on its result.
 
+Lookups come in two shapes. An identifier lookup resolves straight to the entity. A lookup by anything else resolves to an identifier, and the caller feeds that into the identifier lookup — so one cached copy of the entity serves every path to it, and each leg coalesces on its own.
+
 Every method exists in both forms, and both share the same in-flight registration:
 
 | Method | Returns |
 |---|---|
 | `lookupEntitySynchronously` | `Optional<Entity>`, blocking |
 | `lookupEntityAsynchronously` | `CompletableFuture<Optional<Entity>>` |
+| `lookupIdSynchronously` | `Optional<UUID>`, blocking |
+| `lookupIdAsynchronously` | `CompletableFuture<Optional<UUID>>` |
 | `lookupAllValuesSynchronously` | `List<Entity>`, blocking |
 | `lookupAllValuesAsynchronously` | `CompletableFuture<List<Entity>>` |
 
+These are the plumbing. A manager calls `getEntityById*` and `getEntityByKey*` on its `EntityHolder` instead — those wrap the tier walks above and compose the two legs of a secondary lookup for you.
+
+`singleAsynchronously`, `idAsynchronously` and `listAsynchronously` are exposed alongside them, so a manager can add a lookup of its own shape without reimplementing the coalescing.
+
 Work runs on virtual threads, which suits blocking JDBC and Redis calls and means a synchronous caller waiting inside a lookup cannot starve a fixed pool.
 
-Keys are namespaced so an identifier lookup and an email lookup never collide, and string keys are uppercased so callers differing only in casing still share one lookup.
+Keys are namespaced so an identifier lookup and an email lookup never collide, and string keys are uppercased before being used as an in-flight key so callers differing only in casing still share one lookup. That uppercasing is for matching callers against each other and nothing else — each tier is handed the caller's key and applies its own `resolveKey` to decide what it actually reads.
 
-`lookupAllValues` takes both a predicate and an equivalent jOOQ condition — one is applied in memory to the cached entities, the other in SQL. Identifiers already found in a cache are excluded from the query, so the database only returns what the caches missed, and the merged result is deduplicated by identifier.
+An identifier resolved from the database is written back to both tiers by the lookup itself, since the mapping is fully described by the key and the identifier — there is no entity to hand to a caching consumer.
+
+`lookupAllValues` takes both a predicate and an equivalent jOOQ condition — one is applied in memory to the locally cached entities, the other in SQL. Identifiers already found locally are excluded from the query, so the database only returns what the cache missed, and the merged result is deduplicated by identifier. The Redis tier is deliberately not consulted: scraping it means reading and deserialising the entire namespace on every call, and every entity it would have supplied comes back from the query anyway.
+
+Coalescing keys on the rendered condition, so two callers filtering on different values do not share a lookup — which also means a filter over a high-cardinality column rarely coalesces at all.
 
 ---
 
@@ -612,7 +710,7 @@ Injected wherever Redis is needed — into a `RedisStorage`, or directly for pub
 
 ```java
 @Component
-public class AccountIdRedisStorage extends RedisStorage<Account> {
+public class AccountIdRedisStorage extends RedisStorage<Account, Account> {
 
     public AccountIdRedisStorage(final MyRedisDriver redisDriver) {
         super(redisDriver, "account:id");
@@ -634,21 +732,42 @@ redisDriver.useResource(commands -> {
 });
 
 final String result = redisDriver.getResource(commands -> commands.get("key"));
+
+// A single command as a future
+final CompletableFuture<String> future = redisDriver.getAsyncResource(commands -> commands.get("key"));
 ```
+
+`getAsyncResource` returns the command's own future, so nothing waits on a thread. It completes on Lettuce's event loop, which means any non-trivial continuation belongs on `thenApplyAsync` with an executor of your choosing rather than `thenApply`.
+
+A driver is connected once and not reused after `disconnect()` — the closed connections are kept rather than nulled, so work still in flight during shutdown fails with Lettuce's own closed-connection error instead of a null dereference.
 
 The timeout is Lettuce's **command** timeout, not a connect timeout — every command waits at most that long before failing. Keep it short when commands run on a latency-sensitive thread.
 
 ### Pub/Sub
 
-The Redis driver doubles as a message bus, which is how a multi-instance deployment keeps its caches honest:
+The Redis driver doubles as a message bus, which is how a multi-instance deployment keeps its local caches honest. Nothing in the library wires this up for you — the local tier is per-instance, so an entity written on one instance leaves every other instance holding its own copy until the TTL lapses.
+
+The instance that writes an entity caches it locally, writes it to Redis, and publishes its identifier. Every other instance reads the fresh copy back out of Redis and replaces what it holds:
 
 ```java
-redisDriver.subscribe("account:invalidate", message -> accountManager.evictEntityById(UUID.fromString(message)));
+// On write
+accountManager.cacheEntity(account);
+redisDriver.publish("account:refresh", account.getId().toString());
 
-redisDriver.publish("account:invalidate", account.getId().toString());
+// On every instance
+redisDriver.subscribe("account:refresh", message -> EXECUTOR.execute(() ->
+        accountManager.getIdRedisStorage().get(message).ifPresent(accountManager.getIdLocalStorage()::index)));
 ```
 
-The pub/sub connection is opened lazily on the first subscription and shared by every channel.
+Publishing the identifier rather than the entity avoids an ordering bug: two writes racing means the older payload can land last, leaving every instance holding a stale value with no way to notice. Reading it back means the loser of the race gets whatever Redis holds, which is the winner.
+
+Subscribers run on Lettuce's event loop, so hand the work to an executor rather than doing a Redis round trip and a decode on the I/O thread.
+
+An entity whose secondary key changed needs the previous key too, or the old key keeps resolving on the instances that never saw the change — publish it alongside the identifier and `reIndex` on receipt.
+
+Redis pub/sub is fire-and-forget: an instance disconnected during a publish never gets the message and holds its entry until the TTL lapses. Usually acceptable with short TTLs; if it isn't, that is the point to move to Streams with consumer groups.
+
+The pub/sub connection is opened lazily on the first subscription and shared by every channel, with one `SUBSCRIBE` issued per channel however many subscribers register. A subscriber that throws is logged and does not stop the rest from being called.
 
 ---
 
@@ -667,6 +786,10 @@ EntityHolder (AccountManager)
     ↕ LocalStorage (ConcurrentHashMap + CacheEntry TTL)
     ↕ RedisStorage (Lettuce + native TTL + namespace index)
     ↕ EntityRepository (database fallback)
+
+Secondary key (email, username)
+    ↕ LocalEntityReferenceIdStorage / RedisEntityReferenceIdStorage (key → identifier)
+    ↕ EntityHolder (identifier → entity, one cached copy)
 ```
 
 | Layer | Responsibility |
@@ -680,9 +803,11 @@ EntityHolder (AccountManager)
 | **DatabaseDriver** | Owns the pool, jOOQ context and batch queue; runs schema setup on connect |
 | **DatabaseApi** | Static registry of every constructed repository, plus the readiness flag |
 | **RedisDriver** | Shared Lettuce connection, command helpers and pub/sub |
-| **Storage** | Unified key-value cache contract with TTL and `index`/`unIndex` |
-| **LocalStorage** | In-process cache with lazy eviction and a periodic sweep |
-| **RedisStorage** | Distributed cache with a per-namespace key index |
-| **CacheEntry** | Cached value paired with an absolute expiry |
+| **Storage** | Unified key-value cache contract with TTL, key normalisation and `index`/`unIndex` |
+| **LocalStorage** | In-process cache with lazy eviction, a periodic sweep and an optional size cap |
+| **RedisStorage** | Distributed cache with a per-namespace key index and chunked whole-namespace reads |
+| **LocalEntityReferenceIdStorage** | Local secondary key → identifier mapping, so the entity is cached once |
+| **RedisEntityReferenceIdStorage** | The same mapping shared across every instance |
+| **CacheEntry** | Cached value paired with a monotonic expiry |
 | **LookupProvider** | Tiered lookup with stampede protection, sync and async |
 | **EntityHolder** | Interface wiring a manager's repository, storages and lookup provider together |
