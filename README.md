@@ -423,7 +423,6 @@ A primary storage keys an entity on its identifier and holds the entity, so `Val
 `ConcurrentHashMap`-backed, keyed by whatever the subclass indexes on.
 
 ```java
-@Component
 public class AccountIdLocalStorage extends LocalStorage<UUID, Account, Account> {
 
     @Override
@@ -470,7 +469,6 @@ A write is never refused. At capacity the storage sweeps expired entries first, 
 Lettuce-backed and shared across every instance pointing at the same Redis. Keys are prefixed with a namespace, and each namespace keeps its own Redis set of member keys — that index is what makes `keys()`, `values()` and `size()` possible without a `SCAN`.
 
 ```java
-@Component
 public class AccountIdRedisStorage extends RedisStorage<Account, Account> {
 
     public AccountIdRedisStorage(final MyRedisDriver redisDriver) {
@@ -519,7 +517,6 @@ A value that will not deserialise — whether it throws or decodes to `null` —
 A secondary key — an email, a username — maps to an entity's **identifier**, not to a second copy of the entity. `LocalEntityReferenceIdStorage` and `RedisEntityReferenceIdStorage` implement that mapping, leaving only `getKey` to write:
 
 ```java
-@Component
 public class AccountEmailLocalStorage extends LocalEntityReferenceIdStorage<String, Account> {
 
     @Override
@@ -540,7 +537,6 @@ public class AccountEmailLocalStorage extends LocalEntityReferenceIdStorage<Stri
 ```
 
 ```java
-@Component
 public class AccountEmailRedisStorage extends RedisEntityReferenceIdStorage<Account> {
 
     public AccountEmailRedisStorage(final MyRedisDriver redisDriver) {
@@ -626,7 +622,6 @@ Coalescing keys on the rendered condition, so two callers filtering on different
 `DatabaseDriver` is abstract so you can subclass it and annotate the subclass for your own framework, keeping the library free of any framework's annotations. The subclass builds its own `HikariConfig` from wherever your application keeps configuration.
 
 ```java
-@Component
 public class MyDatabaseDriver extends DatabaseDriver {
 
     public MyDatabaseDriver(final DatabaseConfig databaseConfig) {
@@ -650,7 +645,7 @@ public class AccountRepository extends EntityRepository<Account> {
 `connect()` is called once the container has finished wiring — from a startup listener, an `@PostConstruct`, or your plugin's enable:
 
 ```java
-@Component
+@Singleton
 @RequiredArgsConstructor
 public class DatabaseInitializer {
 
@@ -697,7 +692,7 @@ Two pgjdbc properties are applied automatically:
 ### Redis
 
 ```java
-@Component
+@Singleton
 public class MyRedisDriver extends RedisDriver {
 
     public MyRedisDriver(final RedisConfig redisConfig) {
@@ -709,7 +704,6 @@ public class MyRedisDriver extends RedisDriver {
 Injected wherever Redis is needed — into a `RedisStorage`, or directly for pub/sub. Its `connect()` runs alongside the database driver's, before anything touches it.
 
 ```java
-@Component
 public class AccountIdRedisStorage extends RedisStorage<Account, Account> {
 
     public AccountIdRedisStorage(final MyRedisDriver redisDriver) {
