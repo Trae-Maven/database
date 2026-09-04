@@ -188,7 +188,7 @@ The repository registers itself with `DatabaseApi` on construction. Build every 
 Implement `EntityHolder` on your manager to get tiered, coalesced lookups by identifier for free.
 
 ```java
-@Service
+@Singleton
 @RequiredArgsConstructor
 @Getter
 public class AccountManager implements EntityHolder<Account, AccountRepository> {
