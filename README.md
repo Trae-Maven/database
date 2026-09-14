@@ -21,7 +21,9 @@ Database removes the boilerplate around persistence. Declare an entity's columns
 - **Local storage** — `ConcurrentHashMap`-backed cache with per-storage TTL, lazy eviction on read, a periodic sweep and an optional size cap, with no background scheduler
 - **Redis storage** — Lettuce-backed distributed cache with native TTL, a per-namespace key index enabling iteration without `SCAN`, chunked `MGET` retrieval and automatic eviction of values that no longer decode
 - **Reference storages** — a secondary key maps to an entity's identifier rather than a second copy of the entity, so one cached entity serves every path to it
-- **Redis pub/sub** — publish and subscribe on the same driver, for cross-server cache invalidation on a multi-instance deployment
+- **Coordinated writes** — `updateEntity` drops the stale reference entries, applies the change, re-caches, writes only the columns that actually moved, and tells every other instance which ones they were
+- **Cross-instance invalidation** — every holder publishes its changes on a channel named after its entity and subscribes to the same one, so a multi-instance deployment keeps its local caches honest without any wiring of your own
+- **Redis pub/sub** — publish and subscribe on the same driver, used by the update channel and available directly for anything else
 - **Framework-agnostic** — no Spring or dependency-injection annotations anywhere in the library; annotate your own classes for whichever container you use
 
 ---
@@ -176,7 +178,7 @@ public class AccountRepository extends EntityRepository<Account> {
     }
 
     public Optional<Account> findByEmail(final String email) {
-        return this.findOne(AccountProperty.EMAIL, email);
+        return this.findOne(AccountProperty.EMAIL, email.toLowerCase(Locale.ROOT));
     }
 }
 ```
@@ -189,34 +191,96 @@ Implement `EntityHolder` on your manager to get tiered, coalesced lookups by ide
 
 ```java
 @Singleton
-@RequiredArgsConstructor
 @Getter
 public class AccountManager implements EntityHolder<Account, AccountRepository> {
 
     private final AccountRepository repository;
+
     private final AccountIdLocalStorage idLocalStorage;
     private final AccountIdRedisStorage idRedisStorage;
 
     private final AccountEmailLocalStorage emailLocalStorage;
     private final AccountEmailRedisStorage emailRedisStorage;
 
-    private final LookupProvider<Account> lookupProvider = new LookupProvider<>(this);
+    private final AccountUsernameLocalStorage usernameLocalStorage;
+    private final AccountUsernameRedisStorage usernameRedisStorage;
 
-    @Override
-    public void cacheEntity(final Account account) {
-        this.idLocalStorage.index(account);
-        this.idRedisStorage.index(account);
+    private final LookupProvider<Account> lookupProvider;
+
+    public AccountManager(final AccountRepository repository, final RedisDriver redisDriver) {
+        this.repository = repository;
+
+        this.idLocalStorage = new AccountIdLocalStorage();
+        this.idRedisStorage = new AccountIdRedisStorage(redisDriver);
+
+        this.emailLocalStorage = new AccountEmailLocalStorage();
+        this.emailRedisStorage = new AccountEmailRedisStorage(redisDriver);
+
+        this.usernameLocalStorage = new AccountUsernameLocalStorage();
+        this.usernameRedisStorage = new AccountUsernameRedisStorage(redisDriver);
+
+        this.lookupProvider = new LookupProvider<>(this);
+
+        this.listenForEntityUpdates();
     }
 
     @Override
-    public void evictEntity(final Account account) {
+    public void cacheLocalEntity(final Account account) {
+        this.idLocalStorage.index(account);
+        this.emailLocalStorage.index(account);
+        this.usernameLocalStorage.index(account);
+    }
+
+    @Override
+    public void cacheRedisEntity(final Account account) {
+        this.idRedisStorage.index(account);
+        this.emailRedisStorage.index(account);
+        this.usernameRedisStorage.index(account);
+    }
+
+    @Override
+    public void evictLocalEntity(final Account account) {
         this.idLocalStorage.unIndex(account);
+        this.emailLocalStorage.unIndex(account);
+        this.usernameLocalStorage.unIndex(account);
+    }
+
+    @Override
+    public void evictRedisEntity(final Account account) {
         this.idRedisStorage.unIndex(account);
+        this.emailRedisStorage.unIndex(account);
+        this.usernameRedisStorage.unIndex(account);
+    }
+
+    @Override
+    public void deleteStaleLocalStorage(final Account account, final EntityProperty<Account, ?> property) {
+        if (property == AccountProperty.EMAIL) {
+            this.emailLocalStorage.unIndex(account);
+        } else if (property == AccountProperty.USERNAME) {
+            this.usernameLocalStorage.unIndex(account);
+        }
+    }
+
+    @Override
+    public void deleteStaleRedisStorage(final Account account, final EntityProperty<Account, ?> property) {
+        if (property == AccountProperty.EMAIL) {
+            this.emailRedisStorage.unIndex(account);
+        } else if (property == AccountProperty.USERNAME) {
+            this.usernameRedisStorage.unIndex(account);
+        }
     }
 }
 ```
 
-`@Getter` satisfies `getRepository()`, `getIdLocalStorage()`, `getIdRedisStorage()` and `getLookupProvider()`, so the only methods left to write are the two cache hooks.
+`@Getter` satisfies `getRepository()`, `getIdLocalStorage()`, `getIdRedisStorage()` and `getLookupProvider()`, so the only methods left to write are the three cache hooks:
+
+| Hook | Called when | Should do |
+|---|---|---|
+| `cacheEntity` | a lookup found the entity further down the tiers, or a write just changed it | index it in every tier, local and Redis, under every key that points at it |
+| `evictEntity` | another instance reported a change | drop the local copies only, leaving Redis holding the fresh one the next lookup reads |
+| `deleteStaleStorage` | a property is about to change, or just changed elsewhere | un-index the reference entries that property owns, while the entity still holds the old value |
+
+`listenForEntityUpdates()` in the constructor subscribes the manager to the update channel. Without it the instance still writes correctly, it just never hears about anyone else's writes.
 
 ```java
 final Optional<Account> accountOptional = accountManager.getEntityByIdSynchronously(id);
@@ -274,6 +338,77 @@ accountRepository.delete(account);
 | `save` | `INSERT ... ON CONFLICT (id) DO UPDATE` |
 | `update` | `UPDATE ... SET <named columns> WHERE id = ?` |
 | `delete` | `DELETE FROM ... WHERE id = ?` |
+
+---
+
+## Coordinated Writes
+
+`repository.update` writes a row. It does not touch the caches, and it does not tell the other instances anything. `EntityHolder.updateEntity` is the path that does all three, and it is what an application should call.
+
+Declare the properties the change may touch, then mutate the entity inside the runnable:
+
+```java
+accountManager.updateEntity(account, AccountProperty.EMAIL, () -> account.setEmail("new@example.com"));
+
+accountManager.updateEntity(account, List.of(AccountProperty.EMAIL, AccountProperty.USERNAME), () -> {
+    account.setEmail("new@example.com");
+    account.setUsername("newname");
+});
+```
+
+The declared list drives everything: which reference entries are dropped, which columns the repository writes, and which column names go out on the channel. A property you change without declaring keeps a stale index and never reaches the database.
+
+What happens, in order:
+
+1. each declared property's current value is read and kept
+2. `deleteStaleStorage` runs for each of them, while the entity still holds the values its indexes were built from
+3. the runnable applies the change
+4. the values are compared, and only the properties that actually moved survive
+5. `cacheEntity` re-indexes the entity under its new values
+6. the repository writes the changed columns
+7. the changed column names are published on the entity's update channel
+
+Steps 4 and 7 are why a caller can be generous with the declared list. Writing the same value back, or declaring a property the runnable turns out not to touch, costs one comparison and nothing else: no database write, no message, no work on any other instance.
+
+The comparison catches a replaced value, not a mutated one. A property holding a list that the runnable adds to in place looks unchanged, because the before and after are the same object. Replace the collection rather than mutating it, or call `repository.update` yourself.
+
+### From Spring Boot
+
+Nothing about the service layer changes. Load through the manager, write through the manager:
+
+```java
+@Service
+@RequiredArgsConstructor
+public class AccountService {
+
+    private final AccountManager accountManager;
+
+    public void changeEmail(final UUID id, final String email) {
+        final Account account = this.accountManager.getEntityByIdSynchronously(id).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No such account"));
+
+        if (this.accountManager.getEntityByEmailSynchronously(email).isPresent()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Email already in use");
+        }
+
+        this.accountManager.updateEntity(account, AccountProperty.EMAIL, () -> account.setEmail(email));
+    }
+
+    public void changeProfile(final UUID id, final String email, final String username) {
+        final Account account = this.accountManager.getEntityByIdSynchronously(id).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No such account"));
+
+        this.accountManager.updateEntity(account, List.of(AccountProperty.EMAIL, AccountProperty.USERNAME), () -> {
+            account.setEmail(email);
+            account.setUsername(username);
+        });
+    }
+}
+```
+
+`changeProfile` handles a request that submits both fields but only ever changes one of them. The unchanged field is compared, found equal, and dropped before anything is written, so the request costs a single-column `UPDATE` rather than a two-column one.
+
+The uniqueness check in `changeEmail` reads through the same tiered lookup as everything else, so it is usually a map read rather than a query. It is not a substitute for a unique constraint on the column: two requests racing can both pass it.
+
+On a request thread, prefer the synchronous forms. The asynchronous ones complete on a virtual thread, and a Spring request scope, security context or transaction does not follow them.
 
 ---
 
@@ -423,21 +558,11 @@ A primary storage keys an entity on its identifier and holds the entity, so `Val
 `ConcurrentHashMap`-backed, keyed by whatever the subclass indexes on.
 
 ```java
-public class AccountIdLocalStorage extends LocalStorage<UUID, Account, Account> {
+public class AccountIdLocalStorage extends IdLocalStorage<Account> {
 
     @Override
     public Duration getTTL() {
         return Duration.ofMinutes(5);
-    }
-
-    @Override
-    public void index(final Account account) {
-        this.put(account.getId(), account);
-    }
-
-    @Override
-    public void unIndex(final Account account) {
-        this.remove(account.getId());
     }
 }
 ```
@@ -739,29 +864,34 @@ The timeout is Lettuce's **command** timeout, not a connect timeout — every co
 
 ### Pub/Sub
 
-The Redis driver doubles as a message bus, which is how a multi-instance deployment keeps its local caches honest. Nothing in the library wires this up for you — the local tier is per-instance, so an entity written on one instance leaves every other instance holding its own copy until the TTL lapses.
+The Redis driver doubles as a message bus, and that is what keeps a multi-instance deployment's local caches honest. The local tier is per-instance, so an entity written on one instance would otherwise leave every other one holding its own copy until the TTL lapsed.
 
-The instance that writes an entity caches it locally, writes it to Redis, and publishes its identifier. Every other instance reads the fresh copy back out of Redis and replaces what it holds:
+`EntityHolder` wires this up itself. Every holder publishes on a channel named after its entity type, `Entity-Update-Account`, and `listenForEntityUpdates()` subscribes it to the same one, so two instances agree on the channel without being told what it is called.
+
+What travels is an `EntityUpdateDto`: the publishing instance's identifier, the entity's identifier, and the names of the columns that changed. Not the entity itself. Two writes racing means the older payload can land last, which would leave every instance holding a stale value with no way to notice. Naming the columns instead means the receiving side goes and reads whatever Redis currently holds, which is the winner of the race.
+
+A receiving instance:
+
+1. ignores the message if it published it, rather than evicting what it just cached
+2. ignores it if it was not holding that entity, since there is nothing stale to drop
+3. resolves each column name back to its registered property and calls `deleteStaleStorage`, using its own stale copy's values
+4. calls `evictEntity`
+
+That leaves Redis as the source of truth. The next lookup on that instance misses locally, finds the writer's copy in Redis, and caches it.
+
+Two things follow from this. `evictEntity` must leave the Redis tier alone, or the instance deletes the very copy it is about to read. And a column arriving that resolves to no registered property is skipped rather than failing the message, which is what lets an instance running an older build stay up during a rolling deploy.
+
+Redis pub/sub is fire and forget. An instance disconnected during a publish never hears about the change and serves its local copy until the TTL lapses, so a reference or identifier storage with a null TTL will hold it indefinitely. Give the local tiers a TTL you are willing to be stale for; if that is not good enough, this is the point to move to Streams with consumer groups.
+
+The driver is still available directly for anything unrelated:
 
 ```java
-// On write
-accountManager.cacheEntity(account);
-redisDriver.publish("account:refresh", account.getId().toString());
+redisDriver.publish("server:broadcast", message);
 
-// On every instance
-redisDriver.subscribe("account:refresh", message -> EXECUTOR.execute(() ->
-        accountManager.getIdRedisStorage().get(message).ifPresent(accountManager.getIdLocalStorage()::index)));
+redisDriver.subscribe("server:broadcast", message -> EXECUTOR.execute(() -> this.handle(message)));
 ```
 
-Publishing the identifier rather than the entity avoids an ordering bug: two writes racing means the older payload can land last, leaving every instance holding a stale value with no way to notice. Reading it back means the loser of the race gets whatever Redis holds, which is the winner.
-
-Subscribers run on Lettuce's event loop, so hand the work to an executor rather than doing a Redis round trip and a decode on the I/O thread.
-
-An entity whose secondary key changed needs the previous key too, or the old key keeps resolving on the instances that never saw the change — publish it alongside the identifier and `reIndex` on receipt.
-
-Redis pub/sub is fire-and-forget: an instance disconnected during a publish never gets the message and holds its entry until the TTL lapses. Usually acceptable with short TTLs; if it isn't, that is the point to move to Streams with consumer groups.
-
-The pub/sub connection is opened lazily on the first subscription and shared by every channel, with one `SUBSCRIBE` issued per channel however many subscribers register. A subscriber that throws is logged and does not stop the rest from being called.
+Subscribers run on Lettuce's event loop, so hand anything blocking to an executor rather than doing it on the I/O thread. The pub/sub connection is opened lazily on the first subscription and shared by every channel, with one `SUBSCRIBE` issued per channel however many subscribers register. A subscriber that throws is logged and does not stop the rest from being called.
 
 ---
 
@@ -784,6 +914,12 @@ EntityHolder (AccountManager)
 Secondary key (email, username)
     ↕ LocalEntityReferenceIdStorage / RedisEntityReferenceIdStorage (key → identifier)
     ↕ EntityHolder (identifier → entity, one cached copy)
+
+Write (updateEntity)
+    ↕ deleteStaleStorage (drop the reference entries going stale)
+    ↕ cacheEntity (re-index under the new values)
+    ↕ EntityRepository (write the columns that moved)
+    ↕ EntityUpdateDto → RedisDriver pub/sub → every other instance
 ```
 
 | Layer | Responsibility |
@@ -804,4 +940,5 @@ Secondary key (email, username)
 | **RedisEntityReferenceIdStorage** | The same mapping shared across every instance |
 | **CacheEntry** | Cached value paired with a monotonic expiry |
 | **LookupProvider** | Tiered lookup with stampede protection, sync and async |
-| **EntityHolder** | Interface wiring a manager's repository, storages and lookup provider together |
+| **EntityHolder** | Interface wiring a manager's repository, storages and lookup provider together; owns the write path and the update channel |
+| **EntityUpdateDto** | One entity change on the wire: publishing instance, entity identifier and the columns that moved |

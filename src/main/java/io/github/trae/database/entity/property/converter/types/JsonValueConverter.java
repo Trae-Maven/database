@@ -1,7 +1,7 @@
 package io.github.trae.database.entity.property.converter.types;
 
-import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
+import io.github.trae.database.constants.Constants;
 import io.github.trae.database.entity.property.converter.ValueConverter;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -36,12 +36,6 @@ import java.util.List;
 @AllArgsConstructor
 @Getter
 public class JsonValueConverter<Value> implements ValueConverter<Value, JSONB> {
-
-    /**
-     * Shared Gson instance — stateless and thread-safe, so one serves every
-     * converter.
-     */
-    private static final Gson GSON = new Gson();
 
     /**
      * The raw class of the value, as required by {@link ValueConverter}.
@@ -104,7 +98,7 @@ public class JsonValueConverter<Value> implements ValueConverter<Value, JSONB> {
      */
     @Override
     public JSONB serialize(final Value value) {
-        return JSONB.valueOf(GSON.toJson(value, this.genericType));
+        return JSONB.valueOf(Constants.GSON.toJson(value, this.genericType));
     }
 
     /**
@@ -115,6 +109,6 @@ public class JsonValueConverter<Value> implements ValueConverter<Value, JSONB> {
      */
     @Override
     public Value deserialize(final JSONB stored) {
-        return GSON.fromJson(stored.data(), this.genericType);
+        return Constants.GSON.fromJson(stored.data(), this.genericType);
     }
 }

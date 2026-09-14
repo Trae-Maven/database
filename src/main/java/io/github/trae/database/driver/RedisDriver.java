@@ -11,7 +11,6 @@ import io.lettuce.core.pubsub.RedisPubSubAdapter;
 import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
 import lombok.CustomLog;
 import lombok.Getter;
-import lombok.RequiredArgsConstructor;
 
 import java.time.Duration;
 import java.util.Collections;
@@ -53,7 +52,6 @@ import java.util.function.Function;
  * dereference.</p>
  */
 @CustomLog
-@RequiredArgsConstructor
 public class RedisDriver implements Connector {
 
     /**
@@ -99,6 +97,13 @@ public class RedisDriver implements Connector {
      * without one.
      */
     private volatile StatefulRedisPubSubConnection<String, String> pubSubConnection;
+
+    public RedisDriver(final String address, final int port, final String password, final long timeout) {
+        this.address = address;
+        this.port = port;
+        this.password = password;
+        this.timeout = timeout;
+    }
 
     /**
      * Creates the client and opens the shared command connection, ignoring a

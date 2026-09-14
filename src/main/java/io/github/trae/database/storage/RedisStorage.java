@@ -6,6 +6,7 @@ import io.lettuce.core.KeyValue;
 import io.lettuce.core.SetArgs;
 import lombok.AllArgsConstructor;
 import lombok.CustomLog;
+import lombok.Getter;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -64,6 +65,7 @@ public abstract class RedisStorage<Value, IndexValue> implements Storage<String,
     /**
      * The connection used for every command.
      */
+    @Getter
     private final RedisDriver redisDriver;
 
     /**

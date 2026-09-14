@@ -28,7 +28,9 @@ import java.util.function.Function;
  *
  * <p>Because registration happens in a static initialiser, the holder class must
  * be loaded before the repository performs any schema or read work; referencing
- * any one of its constants is enough to trigger that.</p>
+ * any one of its constants is enough to trigger that. The same applies to
+ * {@link #getEntityPropertyByColumn}, which can only resolve a property the
+ * holder class has already registered.</p>
  *
  * <pre>{@code
  * public class AccountProperty {
@@ -130,6 +132,29 @@ public final class EntityProperty<Entity extends io.github.trae.database.entity.
     @SuppressWarnings("unchecked")
     public static <Entity extends io.github.trae.database.entity.Entity> List<EntityProperty<Entity, ?>> getEntityPropertyList(final Class<Entity> type) {
         return (List<EntityProperty<Entity, ?>>) (List<?>) REGISTRY_MAP.getOrDefault(type, List.of());
+    }
+
+    /**
+     * Finds a registered property by its column name.
+     *
+     * <p>Resolves a property that arrived as a bare name, such as one carried
+     * across instances on the entity update channel, back to the registered
+     * constant.</p>
+     *
+     * @param <Entity> the entity type
+     * @param type     the entity class the property belongs to
+     * @param column   the column name to match
+     * @return the matching property, or {@code null} if the entity has none by
+     * that name
+     */
+    public static <Entity extends io.github.trae.database.entity.Entity> EntityProperty<Entity, ?> getEntityPropertyByColumn(final Class<Entity> type, final String column) {
+        for (final EntityProperty<Entity, ?> entityProperty : getEntityPropertyList(type)) {
+            if (entityProperty.getColumn().equals(column)) {
+                return entityProperty;
+            }
+        }
+
+        return null;
     }
 
     /**
