@@ -155,6 +155,8 @@ public class BatchQueue {
 
         final String key = "%s:%s".formatted(table, identifierValue);
 
+        LOGGER.info("QUEUE {} {} {} values={}", operationType, table, identifierValue, valueMap);
+
         this.pendingWriteMap.merge(key, new PendingWrite(table, key, this.sequence.incrementAndGet(), identifierField, identifierValue, valueMap, operationType), PendingWrite::merge);
     }
 

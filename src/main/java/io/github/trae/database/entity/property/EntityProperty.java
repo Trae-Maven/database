@@ -133,22 +133,31 @@ public final class EntityProperty<Entity extends io.github.trae.database.entity.
     }
 
     /**
-     * Returns every property registered against the given entity type, in
-     * declaration order.
+     * Returns every property registered for the specified entity type and its
+     * entity superclasses.
      *
-     * <p>Returns an empty list if the entity's property holder class has not been
-     * initialised yet, which would leave a table with no columns beyond its
-     * identifier.</p>
+     * <p>Properties registered against an abstract entity type are inherited by
+     * concrete entity implementations.</p>
      *
      * @param <Entity> the entity type
-     * @param type     the entity class to look up
-     * @return the registered properties, empty if none
+     * @param type     the entity class
+     * @return the registered properties, including inherited properties
      */
     @SuppressWarnings("unchecked")
     public static <Entity extends io.github.trae.database.entity.Entity> List<EntityProperty<? super Entity, ?>> getEntityPropertyList(final Class<Entity> type) {
-        return REGISTRY_MAP.getOrDefault(type, List.of()).stream()
-                .<EntityProperty<? super Entity, ?>>map(entityProperty -> (EntityProperty<? super Entity, ?>) entityProperty)
-                .toList();
+        final List<EntityProperty<? super Entity, ?>> entityPropertyList = new ArrayList<>();
+
+        Class<?> currentType = type;
+
+        while (currentType != null && currentType != io.github.trae.database.entity.Entity.class) {
+            REGISTRY_MAP.getOrDefault(currentType, List.of()).forEach(entityProperty ->
+                    entityPropertyList.add((EntityProperty<? super Entity, ?>) entityProperty)
+            );
+
+            currentType = currentType.getSuperclass();
+        }
+
+        return List.copyOf(entityPropertyList);
     }
 
     /**
@@ -172,6 +181,23 @@ public final class EntityProperty<Entity extends io.github.trae.database.entity.
         }
 
         return null;
+    }
+
+    /**
+     * Initializes the specified property holder class.
+     *
+     * <p>Forces static initialization so its entity properties are registered
+     * before repository schema operations are performed.</p>
+     *
+     * @param propertyType the property holder class to initialize
+     * @throws IllegalStateException if the property holder class cannot be initialized
+     */
+    public static void loadPropertyType(final Class<?> propertyType) {
+        try {
+            Class.forName(propertyType.getName(), true, propertyType.getClassLoader());
+        } catch (final ClassNotFoundException e) {
+            throw new IllegalStateException("Failed to initialize property type '%s'.".formatted(propertyType.getName()), e);
+        }
     }
 
     /**

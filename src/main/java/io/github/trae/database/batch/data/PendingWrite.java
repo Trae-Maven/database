@@ -70,26 +70,25 @@ public class PendingWrite {
     /**
      * Folds a newer write for the same entity into this one.
      *
-     * <p>The newer operation type wins, and its column values override this
-     * write's where they overlap. A delete discards the accumulated columns
-     * entirely, since none of them survive the row.</p>
-     *
-     * <p>Called as the remapping function of a map merge, so {@code this} is
-     * always the write already in the queue and the argument the one just
-     * queued.</p>
+     * <p>Column values from the newer write override existing values where they
+     * overlap. A pending save remains a save when followed by an update so an
+     * entity that has not yet been inserted is still created. A delete discards
+     * all accumulated column values.</p>
      *
      * @param pendingWrite the newly queued write
      * @return a write representing both
      */
     public PendingWrite merge(final PendingWrite pendingWrite) {
-        Map<Field<?>, Object> mergedValueMap = Collections.emptyMap();
-
-        if (pendingWrite.getOperationType() != OperationType.DELETE) {
-            mergedValueMap = new LinkedHashMap<>(this.valueMap);
-            mergedValueMap.putAll(pendingWrite.getValueMap());
+        if (pendingWrite.getOperationType() == OperationType.DELETE) {
+            return new PendingWrite(this.table, this.key, this.sequence, this.identifierField, this.identifierValue, Collections.emptyMap(), OperationType.DELETE);
         }
 
-        return new PendingWrite(this.table, this.key, this.sequence, this.identifierField, this.identifierValue, mergedValueMap, pendingWrite.getOperationType());
+        final Map<Field<?>, Object> mergedValueMap = new LinkedHashMap<>(this.valueMap);
+        mergedValueMap.putAll(pendingWrite.getValueMap());
+
+        final OperationType operationType = this.operationType == OperationType.SAVE && pendingWrite.getOperationType() == OperationType.UPDATE ? OperationType.SAVE : pendingWrite.getOperationType();
+
+        return new PendingWrite(this.table, this.key, this.sequence, this.identifierField, this.identifierValue, mergedValueMap, operationType);
     }
 
     /**
