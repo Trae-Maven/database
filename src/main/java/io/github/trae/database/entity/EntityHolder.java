@@ -228,13 +228,14 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      * mutation run, and the re-cache re-indexes under the new ones. Reversing
      * those two would un-index the new key and orphan the old.</p>
      *
-     * <p>The database write follows, then the broadcast. Redis already holds the
-     * new copy by then, so an instance reacting to the message reads the new
-     * state rather than racing the writer.</p>
+     * <p>Any persistent changes are written to the database, then all changes are
+     * broadcast. Redis already holds the new copy by then, so an instance reacting
+     * to the message reads the new state rather than racing the writer.</p>
      *
-     * <p>Only the changed columns are broadcast, since a property cannot be
-     * serialised: it holds a getter, a setter and a jOOQ type. The receiving side
-     * resolves each name back through the registry.</p>
+     * <p>Only the changed properties are broadcast, including non-persistent ones,
+     * since a property cannot be serialised: it holds a getter, a setter and a
+     * jOOQ type. The receiving side resolves each column name back through the
+     * registry.</p>
      *
      * @param entity             the entity being changed
      * @param entityPropertyList the properties the mutation may touch

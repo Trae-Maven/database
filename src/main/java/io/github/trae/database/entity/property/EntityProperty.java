@@ -15,16 +15,18 @@ import java.util.function.BiConsumer;
 import java.util.function.Function;
 
 /**
- * Binds one column of an entity's table to the getter and setter that read and
- * write it, along with the jOOQ {@link DataType} describing how it is stored.
+ * Binds a property of an entity to the getter and setter that read and write
+ * it, along with the jOOQ {@link DataType} describing how it is represented
+ * when persisted.
  *
  * <p>Properties are declared as {@code public static final} constants on a holder
  * class per entity and created through {@link #register} or
  * {@link #registerWithConverter}, both of which add the property to a static
- * registry keyed by entity type. That registry is what
- * {@link io.github.trae.database.repository.EntityRepository} reads to know an
- * entity's full column set — for schema creation, for full saves, and for
- * rebuilding an entity from a result row.</p>
+ * registry keyed by entity type. Persistent properties are used by
+ * {@link io.github.trae.database.repository.EntityRepository} for schema
+ * creation, saves, reads and updates. Non-persistent properties remain
+ * registered and may still participate in caching and entity update
+ * propagation without being stored in the database.</p>
  *
  * <p>Because registration happens in a static initialiser, the holder class must
  * be loaded before the repository performs any schema or read work; referencing
@@ -35,7 +37,8 @@ import java.util.function.Function;
  * <pre>{@code
  * public class AccountProperty {
  *
- *     public static final EntityProperty<Account, String> EMAIL = EntityProperty.register(Account.class, "email", Account::getEmail, Account::setEmail, SQLDataType.VARCHAR);
+ *     public static final EntityProperty<Account, String> EMAIL = EntityProperty.register(Account.class, "email", Account::getEmail, Account::setEmail, SQLDataType.VARCHAR, true);
+ *     public static final EntityProperty<Account, Boolean> ONLINE = EntityProperty.register(Account.class, "online", Account::isOnline, Account::setOnline, SQLDataType.BOOLEAN, false);
  * }
  * }</pre>
  *
@@ -75,19 +78,30 @@ public final class EntityProperty<Entity extends io.github.trae.database.entity.
     private final DataType<Value> dataType;
 
     /**
+     * Whether this property is persisted in the database.
+     *
+     * <p>A persistent property participates in database schema creation, reads,
+     * inserts and updates. A non-persistent property remains registered and may
+     * still participate in caching and entity update propagation, but is excluded
+     * from database operations.</p>
+     */
+    private final boolean persistent;
+
+    /**
      * Creates a property and registers it against the given entity type.
      *
-     * @param <Entity> the entity type
-     * @param <Value>  the property's value type
-     * @param type     the entity class the property belongs to
-     * @param column   the column name in the entity's table
-     * @param getter   reads the value from an entity
-     * @param setter   writes the value onto an entity
-     * @param dataType the jOOQ data type for the column
+     * @param <Entity>   the entity type
+     * @param <Value>    the property's value type
+     * @param type       the entity class the property belongs to
+     * @param column     the column name in the entity's table
+     * @param getter     reads the value from an entity
+     * @param setter     writes the value onto an entity
+     * @param dataType   the jOOQ data type for the column
+     * @param persistent whether the property is persisted in the database
      * @return the newly created property, to be held as a constant
      */
-    public static <Entity extends io.github.trae.database.entity.Entity, Value> EntityProperty<Entity, Value> register(final Class<Entity> type, final String column, final Function<Entity, Value> getter, final BiConsumer<Entity, Value> setter, final DataType<Value> dataType) {
-        final EntityProperty<Entity, Value> entityProperty = new EntityProperty<>(column, getter, setter, dataType);
+    public static <Entity extends io.github.trae.database.entity.Entity, Value> EntityProperty<Entity, Value> register(final Class<Entity> type, final String column, final Function<Entity, Value> getter, final BiConsumer<Entity, Value> setter, final DataType<Value> dataType, final boolean persistent) {
+        final EntityProperty<Entity, Value> entityProperty = new EntityProperty<>(column, getter, setter, dataType, persistent);
 
         REGISTRY_MAP.computeIfAbsent(type, ignored -> new ArrayList<>()).add(entityProperty);
 
@@ -111,10 +125,11 @@ public final class EntityProperty<Entity extends io.github.trae.database.entity.
      * @param getter         reads the value from an entity
      * @param setter         writes the value onto an entity
      * @param valueConverter converts between the value and stored types
+     * @param persistent     whether the property is persisted in the database
      * @return the newly created property, to be held as a constant
      */
-    public static <Entity extends io.github.trae.database.entity.Entity, Value, Stored> EntityProperty<Entity, Value> registerWithConverter(final Class<Entity> type, final String column, final Function<Entity, Value> getter, final BiConsumer<Entity, Value> setter, final ValueConverter<Value, Stored> valueConverter) {
-        return register(type, column, getter, setter, valueConverter.toDataType());
+    public static <Entity extends io.github.trae.database.entity.Entity, Value, Stored> EntityProperty<Entity, Value> registerWithConverter(final Class<Entity> type, final String column, final Function<Entity, Value> getter, final BiConsumer<Entity, Value> setter, final ValueConverter<Value, Stored> valueConverter, final boolean persistent) {
+        return register(type, column, getter, setter, valueConverter.toDataType(), persistent);
     }
 
     /**

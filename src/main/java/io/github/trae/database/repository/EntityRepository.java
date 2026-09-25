@@ -145,7 +145,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
     }
 
     /**
-     * Creates the table if it does not exist, with a column per registered
+     * Creates the table if it does not exist, with a column per persistent
      * property plus the identifier primary key.
      *
      * <p>Does nothing to an existing table, including one whose columns no longer
@@ -154,7 +154,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
     public void createTable() {
         CreateTableElementListStep createTableElementListStep = this.databaseDriver.getDslContext().createTableIfNotExists(this.getTable()).column(IDENTIFIER_FIELD, SQLDataType.UUID.nullable(false));
 
-        for (final EntityProperty<? super Entity, ?> entityProperty : EntityProperty.getEntityPropertyList(this.entityType)) {
+        for (final EntityProperty<? super Entity, ?> entityProperty : this.getPersistentEntityPropertyList()) {
             createTableElementListStep = createTableElementListStep.column(entityProperty.getField(), entityProperty.getDataType());
         }
 
@@ -162,14 +162,14 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
     }
 
     /**
-     * Adds any registered property that has no column yet.
+     * Adds any persistent registered property that has no column yet.
      *
      * <p>Additive only. A column whose type has changed is left alone, and a
-     * column whose property has been removed is left in place — so a type change
-     * has to be applied by hand before the table holds rows.</p>
+     * column whose property has been removed or made non-persistent is left in
+     * place — so destructive schema changes have to be applied by hand.</p>
      */
     public void migrateSchema() {
-        EntityProperty.getEntityPropertyList(this.entityType).forEach(entityProperty -> this.databaseDriver.getDslContext().alterTable(this.getTable()).addIfNotExists(DSL.name(entityProperty.getColumn()), entityProperty.getDataType()).execute());
+        this.getPersistentEntityPropertyList().forEach(entityProperty -> this.databaseDriver.getDslContext().alterTable(this.getTable()).addIfNotExists(DSL.name(entityProperty.getColumn()), entityProperty.getDataType()).execute());
     }
 
     /**
@@ -183,12 +183,22 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * Creates every index declared by {@link #getIndexes()} that does not exist
      * yet.
      *
+     * <p>Only persistent properties can be indexed, since non-persistent
+     * properties have no corresponding database column.</p>
+     *
      * <p>Index names follow {@code idx_<table>_<column>}. The trigram and BRIN
      * variants are issued as raw SQL, since jOOQ's DDL builder has no direct
      * support for their operator classes.</p>
+     *
+     * @throws IllegalArgumentException if an index is declared for a
+     *                                  non-persistent property
      */
     public void createIndexes() {
         this.getIndexes().forEach((entityProperty, indexType) -> {
+            if (!entityProperty.isPersistent()) {
+                throw new IllegalArgumentException("Cannot create database index for non-persistent property '%s'.".formatted(entityProperty.getColumn()));
+            }
+
             final String indexName = "idx_%s_%s".formatted(this.tableName, entityProperty.getColumn());
             final Field<?> field = entityProperty.getField();
 
@@ -372,29 +382,43 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
     }
 
     /**
-     * Queues a write of every column as an upsert.
+     * Queues a write of every persistent column as an upsert.
      *
-     * <p>For creating an entity, or for rewriting one wholesale. A partial change
-     * to an existing entity belongs in {@code update(Entity, EntityProperty)}
-     * instead, which writes only what changed.</p>
+     * <p>For creating an entity, or for rewriting one wholesale. Non-persistent
+     * properties are excluded because they have no corresponding database column.
+     * A partial change to an existing entity belongs in
+     * {@code update(Entity, EntityProperty)} instead, which writes only what
+     * changed.</p>
      *
      * @param entity the entity to persist
      */
     public void save(final Entity entity) {
-        this.queue(entity, EntityProperty.getEntityPropertyList(this.entityType), OperationType.SAVE);
+        this.queue(entity, this.getPersistentEntityPropertyList(), OperationType.SAVE);
     }
 
     /**
-     * Queues a write of the named columns only.
+     * Queues a write of the named persistent columns only.
+     *
+     * <p>Non-persistent properties are ignored, allowing the complete set of
+     * changed properties to be supplied while only database-backed properties
+     * are written.</p>
      *
      * <p>Values are read from the entity as this runs, so setters must have been
      * applied before calling.</p>
      *
      * @param entity             the entity to update
-     * @param entityPropertyList the properties whose columns should be written
+     * @param entityPropertyList the properties whose values have changed
      */
     public void update(final Entity entity, final List<EntityProperty<? super Entity, ?>> entityPropertyList) {
-        this.queue(entity, entityPropertyList, OperationType.UPDATE);
+        final List<EntityProperty<? super Entity, ?>> persistentEntityPropertyList = entityPropertyList.stream()
+                .filter(EntityProperty::isPersistent)
+                .toList();
+
+        if (persistentEntityPropertyList.isEmpty()) {
+            return;
+        }
+
+        this.queue(entity, persistentEntityPropertyList, OperationType.UPDATE);
     }
 
     /**
@@ -419,9 +443,10 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
     /**
      * Rebuilds an entity from a result row.
      *
-     * <p>Constructs it from the row's identifier, then applies every registered
-     * property's setter. Any converter on a property's field runs here, so a
-     * value arrives in its Java form rather than its stored one.</p>
+     * <p>Constructs it from the row's identifier, then applies every persistent
+     * property's setter. Non-persistent properties are excluded because they have
+     * no corresponding database column. Any converter on a property's field runs
+     * here, so a value arrives in its Java form rather than its stored one.</p>
      *
      * @param record the row to read
      * @return the reconstructed entity
@@ -429,7 +454,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
     private Entity build(final Record record) {
         final Entity entity = this.instantiate(record.get(IDENTIFIER_FIELD));
 
-        EntityProperty.getEntityPropertyList(this.entityType).forEach(entityProperty -> this.apply(entityProperty, entity, record));
+        this.getPersistentEntityPropertyList().forEach(entityProperty -> this.apply(entityProperty, entity, record));
 
         return entity;
     }
@@ -493,5 +518,20 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
                 (map, entityProperty) -> map.put(entityProperty.getField(), entityProperty.getValue(e)),
                 LinkedHashMap::putAll
         );
+    }
+
+    /**
+     * Returns every registered property that is persisted in the database.
+     *
+     * <p>Non-persistent properties remain available to the entity and its caching
+     * and update propagation layers, but have no corresponding database column and
+     * are therefore excluded from all repository operations.</p>
+     *
+     * @return the persistent properties, in declaration order
+     */
+    private List<EntityProperty<? super Entity, ?>> getPersistentEntityPropertyList() {
+        return EntityProperty.getEntityPropertyList(this.entityType).stream()
+                .filter(EntityProperty::isPersistent)
+                .toList();
     }
 }
