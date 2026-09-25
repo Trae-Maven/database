@@ -13,12 +13,14 @@ import io.github.trae.utilities.UtilGeneric;
 import io.github.trae.utilities.UtilJava;
 import io.github.trae.utilities.objects.function.Function;
 
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -241,7 +243,7 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
     default void updateEntity(final Entity entity, final List<EntityProperty<? super Entity, ?>> entityPropertyList, final Runnable updateRunnable) {
         final Map<EntityProperty<? super Entity, ?>, Object> previousValueMap = UtilJava.createMap(new HashMap<>(), map -> {
             for (final EntityProperty<? super Entity, ?> entityProperty : entityPropertyList) {
-                map.put(entityProperty, entityProperty.getValue(entity));
+                map.put(entityProperty, snapshotValue(entityProperty.getValue(entity)));
             }
         });
 
@@ -279,6 +281,33 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      */
     default void updateEntity(final Entity entity, final EntityProperty<? super Entity, ?> entityProperty, final Runnable updateRunnable) {
         this.updateEntity(entity, Collections.singletonList(entityProperty), updateRunnable);
+    }
+
+    /**
+     * Creates a snapshot of the specified value for change detection.
+     *
+     * <p>Maps, sets and collections are copied so mutations to the original
+     * value do not affect the snapshot. Other values are returned unchanged.</p>
+     *
+     * @param value the value to snapshot
+     * @return the snapshot value
+     */
+    private static Object snapshotValue(final Object value) {
+        if (value != null) {
+            if (value instanceof final Map<?, ?> map) {
+                return Map.copyOf(map);
+            }
+
+            if (value instanceof final Set<?> set) {
+                return Set.copyOf(set);
+            }
+
+            if (value instanceof final Collection<?> collection) {
+                return List.copyOf(collection);
+            }
+        }
+
+        return value;
     }
 
     /**
