@@ -11,6 +11,7 @@ import io.lettuce.core.pubsub.RedisPubSubAdapter;
 import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
 import lombok.CustomLog;
 import lombok.Getter;
+import lombok.RequiredArgsConstructor;
 
 import java.time.Duration;
 import java.util.Collections;
@@ -41,6 +42,11 @@ import java.util.function.Function;
  * The usual use is cross-server cache invalidation: whichever server writes an
  * entity publishes its identifier, and the rest evict their copy.</p>
  *
+ * <p>The connection supports Redis ACL username/password authentication,
+ * password-only authentication and optional SSL. When a username is configured,
+ * ACL authentication is used; otherwise, a configured password is used for
+ * password-only authentication.</p>
+ *
  * <p>The configured timeout is Lettuce's <em>command</em> timeout, not a connect
  * timeout — every command waits at most this long before failing. Keep it short
  * when commands run on a latency-sensitive thread, since an unreachable Redis
@@ -51,8 +57,15 @@ import java.util.function.Function;
  * shutdown fails with Lettuce's own closed-connection error instead of a null
  * dereference.</p>
  */
+@RequiredArgsConstructor
 @CustomLog
 public class RedisDriver implements Connector {
+
+    /**
+     * Registered subscribers by channel. Values are copy-on-write so dispatch
+     * never blocks a subscribe.
+     */
+    private final Map<String, List<Consumer<String>>> subscriberMap = new ConcurrentHashMap<>();
 
     /**
      * Redis host.
@@ -65,20 +78,24 @@ public class RedisDriver implements Connector {
     private final int port;
 
     /**
+     * Redis ACL username, or empty when username authentication is not used.
+     */
+    private final String username;
+
+    /**
      * Redis password, or empty for an unauthenticated server.
      */
     private final String password;
 
     /**
+     * Whether SSL is enabled for Redis connections.
+     */
+    private final boolean ssl;
+
+    /**
      * Command timeout in milliseconds.
      */
     private final long timeout;
-
-    /**
-     * Registered subscribers by channel. Values are copy-on-write so dispatch
-     * never blocks a subscribe.
-     */
-    private final Map<String, List<Consumer<String>>> subscriberMap = new ConcurrentHashMap<>();
 
     /**
      * The Lettuce client, created on {@link #connect()}.
@@ -98,16 +115,13 @@ public class RedisDriver implements Connector {
      */
     private volatile StatefulRedisPubSubConnection<String, String> pubSubConnection;
 
-    public RedisDriver(final String address, final int port, final String password, final long timeout) {
-        this.address = address;
-        this.port = port;
-        this.password = password;
-        this.timeout = timeout;
-    }
-
     /**
      * Creates the client and opens the shared command connection, ignoring a
      * second call so a repeated connect cannot orphan the first client.
+     *
+     * <p>ACL username/password authentication is used when a username is
+     * configured, otherwise password-only authentication is used when a password
+     * is configured. SSL is enabled according to the driver's configuration.</p>
      *
      * <p>The pub/sub connection is not opened here — it waits for the first
      * {@link #subscribe(String, Consumer)}.</p>
@@ -118,9 +132,15 @@ public class RedisDriver implements Connector {
             return;
         }
 
-        final RedisURI.Builder builder = RedisURI.builder().withHost(this.address).withPort(this.port).withTimeout(Duration.ofMillis(this.timeout));
+        final RedisURI.Builder builder = RedisURI.builder()
+                .withHost(this.address)
+                .withPort(this.port)
+                .withSsl(this.ssl)
+                .withTimeout(Duration.ofMillis(this.timeout));
 
-        if (!UtilString.isEmpty(this.password)) {
+        if (!UtilString.isEmpty(this.username)) {
+            builder.withAuthentication(this.username, this.password.toCharArray());
+        } else if (!UtilString.isEmpty(this.password)) {
             builder.withPassword(this.password.toCharArray());
         }
 
