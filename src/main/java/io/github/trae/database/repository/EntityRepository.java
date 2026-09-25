@@ -242,6 +242,23 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
     }
 
     /**
+     * Reads the identifier of the first row where a property equals a value.
+     *
+     * @param <Value>        the property's value type
+     * @param entityProperty the property to match on
+     * @param value          the value to match
+     * @return the identifier, or empty if nothing matches
+     */
+    public <Value> Optional<UUID> findIdByValue(final EntityProperty<Entity, Value> entityProperty, final Value value) {
+        return this.databaseDriver.getDslContext()
+                .select(IDENTIFIER_FIELD)
+                .from(this.getTable())
+                .where(entityProperty.getField().eq(value))
+                .limit(1)
+                .fetchOptional(IDENTIFIER_FIELD);
+    }
+
+    /**
      * Reads every row matching a condition.
      *
      * @param condition the condition to match
