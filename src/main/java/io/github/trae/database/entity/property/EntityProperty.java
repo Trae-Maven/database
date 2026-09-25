@@ -130,8 +130,10 @@ public final class EntityProperty<Entity extends io.github.trae.database.entity.
      * @return the registered properties, empty if none
      */
     @SuppressWarnings("unchecked")
-    public static <Entity extends io.github.trae.database.entity.Entity> List<EntityProperty<Entity, ?>> getEntityPropertyList(final Class<Entity> type) {
-        return (List<EntityProperty<Entity, ?>>) (List<?>) REGISTRY_MAP.getOrDefault(type, List.of());
+    public static <Entity extends io.github.trae.database.entity.Entity> List<EntityProperty<? super Entity, ?>> getEntityPropertyList(final Class<Entity> type) {
+        return REGISTRY_MAP.getOrDefault(type, List.of()).stream()
+                .<EntityProperty<? super Entity, ?>>map(entityProperty -> (EntityProperty<? super Entity, ?>) entityProperty)
+                .toList();
     }
 
     /**
@@ -147,8 +149,8 @@ public final class EntityProperty<Entity extends io.github.trae.database.entity.
      * @return the matching property, or {@code null} if the entity has none by
      * that name
      */
-    public static <Entity extends io.github.trae.database.entity.Entity> EntityProperty<Entity, ?> getEntityPropertyByColumn(final Class<Entity> type, final String column) {
-        for (final EntityProperty<Entity, ?> entityProperty : getEntityPropertyList(type)) {
+    public static <Entity extends io.github.trae.database.entity.Entity> EntityProperty<? super Entity, ?> getEntityPropertyByColumn(final Class<Entity> type, final String column) {
+        for (final EntityProperty<? super Entity, ?> entityProperty : getEntityPropertyList(type)) {
             if (entityProperty.getColumn().equals(column)) {
                 return entityProperty;
             }

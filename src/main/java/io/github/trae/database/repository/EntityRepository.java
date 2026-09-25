@@ -140,7 +140,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      *
      * @return the properties to index, mapped to their index type
      */
-    protected Map<EntityProperty<Entity, ?>, IndexType> getIndexes() {
+    protected Map<EntityProperty<? super Entity, ?>, IndexType> getIndexes() {
         return Collections.emptyMap();
     }
 
@@ -154,7 +154,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
     public void createTable() {
         CreateTableElementListStep createTableElementListStep = this.databaseDriver.getDslContext().createTableIfNotExists(this.getTable()).column(IDENTIFIER_FIELD, SQLDataType.UUID.nullable(false));
 
-        for (final EntityProperty<Entity, ?> entityProperty : EntityProperty.getEntityPropertyList(this.entityType)) {
+        for (final EntityProperty<? super Entity, ?> entityProperty : EntityProperty.getEntityPropertyList(this.entityType)) {
             createTableElementListStep = createTableElementListStep.column(entityProperty.getField(), entityProperty.getDataType());
         }
 
@@ -227,7 +227,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @param value          the value to match
      * @return the entity, or empty if nothing matches
      */
-    public <Value> Optional<Entity> findOne(final EntityProperty<Entity, Value> entityProperty, final Value value) {
+    public <Value> Optional<Entity> findOne(final EntityProperty<? super Entity, Value> entityProperty, final Value value) {
         return this.findOne(entityProperty.getField().eq(value));
     }
 
@@ -249,7 +249,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @param value          the value to match
      * @return the identifier, or empty if nothing matches
      */
-    public <Value> Optional<UUID> findIdByValue(final EntityProperty<Entity, Value> entityProperty, final Value value) {
+    public <Value> Optional<UUID> findIdByValue(final EntityProperty<? super Entity, Value> entityProperty, final Value value) {
         return this.databaseDriver.getDslContext()
                 .select(IDENTIFIER_FIELD)
                 .from(this.getTable())
@@ -276,7 +276,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @param value          the value to match
      * @return the matching entities, empty if none
      */
-    public <Value> List<Entity> findMany(final EntityProperty<Entity, Value> entityProperty, final Value value) {
+    public <Value> List<Entity> findMany(final EntityProperty<? super Entity, Value> entityProperty, final Value value) {
         return this.findMany(entityProperty.getField().eq(value));
     }
 
@@ -314,7 +314,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @param id             the entity's identifier
      * @return the value, or empty if the row is absent or the value is null
      */
-    public <Value> Optional<Value> findValue(final EntityProperty<Entity, Value> entityProperty, final UUID id) {
+    public <Value> Optional<Value> findValue(final EntityProperty<? super Entity, Value> entityProperty, final UUID id) {
         return this.databaseDriver.getDslContext().select(entityProperty.getField()).from(this.getTable()).where(IDENTIFIER_FIELD.eq(id)).fetchOptional(entityProperty.getField());
     }
 
@@ -338,7 +338,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @param value          the value to match
      * @return {@code true} if at least one row matches
      */
-    public <Value> boolean exists(final EntityProperty<Entity, Value> entityProperty, final Value value) {
+    public <Value> boolean exists(final EntityProperty<? super Entity, Value> entityProperty, final Value value) {
         return this.exists(entityProperty.getField().eq(value));
     }
 
@@ -393,7 +393,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @param entity             the entity to update
      * @param entityPropertyList the properties whose columns should be written
      */
-    public void update(final Entity entity, final List<EntityProperty<Entity, ?>> entityPropertyList) {
+    public void update(final Entity entity, final List<EntityProperty<? super Entity, ?>> entityPropertyList) {
         this.queue(entity, entityPropertyList, OperationType.UPDATE);
     }
 
@@ -403,7 +403,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @param entity               the entity to update
      * @param entityEntityProperty the property whose column should be written
      */
-    public void update(final Entity entity, final EntityProperty<Entity, ?> entityEntityProperty) {
+    public void update(final Entity entity, final EntityProperty<? super Entity, ?> entityEntityProperty) {
         this.update(entity, Collections.singletonList(entityEntityProperty));
     }
 
@@ -461,7 +461,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @param entity         the entity being built
      * @param record         the row being read
      */
-    private <Value> void apply(final EntityProperty<Entity, Value> entityProperty, final Entity entity, final Record record) {
+    private <Value> void apply(final EntityProperty<? super Entity, Value> entityProperty, final Entity entity, final Record record) {
         entityProperty.getSetter().accept(entity, record.get(entityProperty.getField()));
     }
 
@@ -473,7 +473,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @param entityPropertyList the properties whose columns to write
      * @param operationType      the kind of statement to render
      */
-    private void queue(final Entity entity, final List<EntityProperty<Entity, ?>> entityPropertyList, final OperationType operationType) {
+    private void queue(final Entity entity, final List<EntityProperty<? super Entity, ?>> entityPropertyList, final OperationType operationType) {
         this.databaseDriver.getBatchQueue().queue(this.tableName, IDENTIFIER_FIELD, entity.getId(), this.valueMap(entity, entityPropertyList), operationType);
     }
 
@@ -487,7 +487,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @param entityPropertyList the properties to read
      * @return the columns and their current values
      */
-    private Map<Field<?>, Object> valueMap(final Entity e, final List<EntityProperty<Entity, ?>> entityPropertyList) {
+    private Map<Field<?>, Object> valueMap(final Entity e, final List<EntityProperty<? super Entity, ?>> entityPropertyList) {
         return entityPropertyList.stream().collect(
                 LinkedHashMap::new,
                 (map, entityProperty) -> map.put(entityProperty.getField(), entityProperty.getValue(e)),

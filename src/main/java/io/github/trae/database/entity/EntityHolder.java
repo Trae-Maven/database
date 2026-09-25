@@ -186,7 +186,7 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      * @param entity   the entity whose entries are going stale
      * @param property the property whose entries to remove
      */
-    void deleteStaleLocalStorage(final Entity entity, final EntityProperty<Entity, ?> property);
+    void deleteStaleLocalStorage(final Entity entity, final EntityProperty<? super Entity, ?> property);
 
     /**
      * Removes the Redis reference entries a single property indexes the entity
@@ -199,7 +199,7 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      * @param entity   the entity whose entries are going stale
      * @param property the property whose entries to remove
      */
-    void deleteStaleRedisStorage(final Entity entity, final EntityProperty<Entity, ?> property);
+    void deleteStaleRedisStorage(final Entity entity, final EntityProperty<? super Entity, ?> property);
 
     /**
      * The channel this entity's updates are published on.
@@ -238,21 +238,21 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      * @param entityPropertyList the properties the mutation may touch
      * @param updateRunnable     applies the change to the entity
      */
-    default void updateEntity(final Entity entity, final List<EntityProperty<Entity, ?>> entityPropertyList, final Runnable updateRunnable) {
-        final Map<EntityProperty<Entity, ?>, Object> previousValueMap = UtilJava.createMap(new HashMap<>(), map -> {
-            for (final EntityProperty<Entity, ?> entityProperty : entityPropertyList) {
+    default void updateEntity(final Entity entity, final List<EntityProperty<? super Entity, ?>> entityPropertyList, final Runnable updateRunnable) {
+        final Map<EntityProperty<? super Entity, ?>, Object> previousValueMap = UtilJava.createMap(new HashMap<>(), map -> {
+            for (final EntityProperty<? super Entity, ?> entityProperty : entityPropertyList) {
                 map.put(entityProperty, entityProperty.getValue(entity));
             }
         });
 
-        for (final EntityProperty<Entity, ?> entityProperty : entityPropertyList) {
+        for (final EntityProperty<? super Entity, ?> entityProperty : entityPropertyList) {
             this.deleteStaleLocalStorage(entity, entityProperty);
             this.deleteStaleRedisStorage(entity, entityProperty);
         }
 
         updateRunnable.run();
 
-        final List<EntityProperty<Entity, ?>> changedPropertyList = entityPropertyList.stream()
+        final List<EntityProperty<? super Entity, ?>> changedPropertyList = entityPropertyList.stream()
                 .filter(entityProperty -> !Objects.equals(previousValueMap.get(entityProperty), entityProperty.getValue(entity)))
                 .toList();
 
@@ -277,7 +277,7 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      * @param entityProperty the property the mutation touches
      * @param updateRunnable applies the change to the entity
      */
-    default void updateEntity(final Entity entity, final EntityProperty<Entity, ?> entityProperty, final Runnable updateRunnable) {
+    default void updateEntity(final Entity entity, final EntityProperty<? super Entity, ?> entityProperty, final Runnable updateRunnable) {
         this.updateEntity(entity, Collections.singletonList(entityProperty), updateRunnable);
     }
 
@@ -325,7 +325,7 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
 
             idLocalStorage.get(entityUpdateDto.getId()).ifPresent(entity -> {
                 for (final String column : entityUpdateDto.getColumnList()) {
-                    final EntityProperty<Entity, ?> entityProperty = EntityProperty.getEntityPropertyByColumn(this.getEntityType(), column);
+                    final EntityProperty<? super Entity, ?> entityProperty = EntityProperty.getEntityPropertyByColumn(this.getEntityType(), column);
                     if (entityProperty == null) {
                         continue;
                     }
