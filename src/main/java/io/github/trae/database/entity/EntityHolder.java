@@ -149,6 +149,35 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
     void evictRedisEntity(final Entity entity);
 
     /**
+     * Pins the entity in every local tier maintained by this holder.
+     *
+     * <p>A pinned entry remains resident while the entity is actively owned by this
+     * instance: it cannot expire, be ordinarily evicted, or be removed to satisfy a
+     * storage size limit. It may still be refreshed or replaced, with the pinned
+     * state carried onto the new cache entry.</p>
+     *
+     * <p>Implementations should pin the identifier entry and every local reference
+     * entry currently indexing the entity.</p>
+     *
+     * @param entity the entity to pin locally
+     */
+    void pinLocalEntity(final Entity entity);
+
+    /**
+     * Unpins the entity from every local tier maintained by this holder.
+     *
+     * <p>Unpinning does not remove the entity. Each affected entry returns to its
+     * storage's normal cache policy and begins a fresh time-to-live from the moment
+     * it is unpinned.</p>
+     *
+     * <p>Implementations should unpin the identifier entry and every local reference
+     * entry currently indexing the entity.</p>
+     *
+     * @param entity the entity to unpin locally
+     */
+    void unpinLocalEntity(final Entity entity);
+
+    /**
      * Writes the entity into every tier this holder maintains.
      *
      * <p>Called after a lookup finds an entity further down the tiers, and after
@@ -225,8 +254,8 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      *
      * <p>The stale reference entries are dropped first, while the entity still
      * holds the old values the indexes were built from. Only then does the
-     * mutation run, and the re-cache re-indexes under the new ones. Reversing
-     * those two would un-index the new key and orphan the old.</p>
+     * mutation run, and the re-cache re-indexes under the new ones. Re-cached
+     * reference entries are re-pinned when the entity was already pinned locally.</p>
      *
      * <p>Any persistent changes are written to the database, then all changes are
      * broadcast. Redis already holds the new copy by then, so an instance reacting
@@ -248,6 +277,9 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
             }
         });
 
+        final IdLocalStorage<Entity> idLocalStorage = this.getIdLocalStorage();
+        final boolean pinned = idLocalStorage != null && idLocalStorage.isPinned(entity.getId());
+
         for (final EntityProperty<? super Entity, ?> entityProperty : entityPropertyList) {
             this.deleteStaleLocalStorage(entity, entityProperty);
             this.deleteStaleRedisStorage(entity, entityProperty);
@@ -260,6 +292,10 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
                 .toList();
 
         this.cacheEntity(entity);
+
+        if (pinned) {
+            this.pinLocalEntity(entity);
+        }
 
         if (changedPropertyList.isEmpty()) {
             return;
@@ -321,6 +357,9 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      * Redis and indexed over the top, so nothing has to be evicted and looked up
      * again.</p>
      *
+     * <p>If the entity was pinned locally, that state is restored after the updated
+     * entity is cached so reference entries created under new keys remain pinned.</p>
+     *
      * <p>Redis coming back empty means the entity is gone or its entry lapsed,
      * with nothing to replace the stale copy with, so that copy is dropped
      * instead.</p>
@@ -354,6 +393,8 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
             }
 
             idLocalStorage.get(entityUpdateDto.getId()).ifPresent(entity -> {
+                final boolean pinned = idLocalStorage.isPinned(entity.getId());
+
                 for (final String column : entityUpdateDto.getColumnList()) {
                     final EntityProperty<? super Entity, ?> entityProperty = EntityProperty.getEntityPropertyByColumn(this.getEntityType(), column);
                     if (entityProperty == null) {
@@ -363,7 +404,13 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
                     this.deleteStaleLocalStorage(entity, entityProperty);
                 }
 
-                idRedisStorage.get(entityUpdateDto.getId().toString()).ifPresentOrElse(this::cacheLocalEntity, () -> this.evictLocalEntity(entity));
+                idRedisStorage.get(entityUpdateDto.getId().toString()).ifPresentOrElse(updatedEntity -> {
+                    this.cacheLocalEntity(updatedEntity);
+
+                    if (pinned) {
+                        this.pinLocalEntity(updatedEntity);
+                    }
+                }, () -> this.evictLocalEntity(entity));
             });
         });
     }

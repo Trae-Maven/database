@@ -20,6 +20,18 @@ import java.util.stream.Collectors;
  * expire by the time-to-live returned from {@link #getTTL()}, applied when a
  * value is written; reads do not extend it.</p>
  *
+ * <p>An entry may be pinned to keep it resident while it is actively owned by
+ * this process. Pinned entries do not expire, cannot be removed through
+ * {@link #remove(Object)}, and are excluded from capacity eviction. They may
+ * still be replaced through {@link #put(Object, Object)}, with the pinned state
+ * carried onto the replacement so refreshed data does not accidentally unlock
+ * the entry.</p>
+ *
+ * <p>Unpinning an entry starts a fresh time-to-live from that moment. This lets
+ * callers keep an entry resident for an arbitrary period, then return it to the
+ * storage's normal expiry policy without immediately expiring against the time
+ * at which it was originally written.</p>
+ *
  * <p>There is no background sweeper. Expired entries are dropped when read, and
  * a full sweep runs every {@value #CLEANUP_THRESHOLD} operations, so an entry
  * nobody asks for in a quiet storage still gets collected eventually without a
@@ -28,9 +40,9 @@ import java.util.stream.Collectors;
  * <p>A storage is unbounded unless {@link #getMaxSize()} is overridden. That
  * suits a working set with a natural ceiling — the players on a server, say —
  * but a public endpoint caches whatever gets requested, so a storage reachable
- * that way wants a bound. A write is never refused: at capacity the storage
- * sweeps expired entries first and, if that frees nothing, drops the entries
- * closest to expiring.</p>
+ * that way wants a bound. A write is never refused while an unpinned entry can
+ * make room: at capacity the storage sweeps expired entries first and, if that
+ * frees nothing, drops the unpinned entries closest to expiring.</p>
  *
  * <p>Subclasses supply {@link #index(Object)} and {@link #unIndex(Object)} to
  * decide the key an entity is stored under, and may override
@@ -66,6 +78,10 @@ public abstract class LocalStorage<Key, Value, IndexValue> implements Storage<Ke
      * <p>Invalid keys and null values are ignored. The entry's expiry is set from
      * {@link #getTTL()} at write time, and room is made first if the storage is
      * at capacity.</p>
+     *
+     * <p>If the key already belongs to a pinned entry, the replacement inherits
+     * that state. This allows refreshed values to replace stale ones without
+     * allowing an ordinary cache write to unpin the entry.</p>
      */
     @Override
     public void put(final Key key, final Value value) {
@@ -80,13 +96,20 @@ public abstract class LocalStorage<Key, Value, IndexValue> implements Storage<Ke
             return;
         }
 
-        this.evictIfNecessary();
+        if (!(this.map.containsKey(resolvedValidKey))) {
+            this.evictIfNecessary();
+        }
 
-        this.map.put(resolvedValidKey, CacheEntry.of(value, this.getTTL()));
+        this.map.compute(resolvedValidKey, (resolvedKey, cacheEntry) ->
+                CacheEntry.of(value, this.getTTL(), cacheEntry != null && cacheEntry.isPinned()));
     }
 
     /**
      * {@inheritDoc}
+     *
+     * <p>A pinned entry is left untouched. It must first be explicitly
+     * {@link #unpin(Object) unpinned} before an ordinary removal may discard
+     * it.</p>
      */
     @Override
     public void remove(final Key key) {
@@ -97,14 +120,18 @@ public abstract class LocalStorage<Key, Value, IndexValue> implements Storage<Ke
             return;
         }
 
-        this.map.remove(resolvedValidKey);
+        this.map.computeIfPresent(resolvedValidKey, (resolvedKey, cacheEntry) ->
+                cacheEntry.isPinned() ? cacheEntry : null);
     }
 
     /**
-     * {@inheritDoc}
+     * Returns the value stored under a key.
      *
      * <p>An expired entry is removed as it is found, so the next read skips it
-     * without waiting for a sweep.</p>
+     * without waiting for a sweep. Pinned entries cannot expire.</p>
+     *
+     * @param key the key to look up
+     * @return the cached value, or empty when absent or expired
      */
     @Override
     public Optional<Value> get(final Key key) {
@@ -129,7 +156,13 @@ public abstract class LocalStorage<Key, Value, IndexValue> implements Storage<Ke
     }
 
     /**
-     * {@inheritDoc}
+     * Returns whether a live value exists under a key.
+     *
+     * <p>An expired entry is removed as it is encountered. Pinned entries are
+     * always considered live.</p>
+     *
+     * @param key the key to test
+     * @return {@code true} when a live entry exists
      */
     @Override
     public boolean contains(final Key key) {
@@ -160,7 +193,11 @@ public abstract class LocalStorage<Key, Value, IndexValue> implements Storage<Ke
     public Set<Key> keys() {
         this.cleanupIfNecessary();
 
-        return this.map.entrySet().stream().filter(entry -> !entry.getValue().isExpired()).map(Map.Entry::getKey).collect(Collectors.toUnmodifiableSet());
+        return this.map.entrySet()
+                .stream()
+                .filter(entry -> !entry.getValue().isExpired())
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     /**
@@ -170,7 +207,11 @@ public abstract class LocalStorage<Key, Value, IndexValue> implements Storage<Ke
     public List<Value> values() {
         this.cleanupIfNecessary();
 
-        return this.map.values().stream().filter(value -> !value.isExpired()).map(CacheEntry::getValue).toList();
+        return this.map.values()
+                .stream()
+                .filter(cacheEntry -> !cacheEntry.isExpired())
+                .map(CacheEntry::getValue)
+                .toList();
     }
 
     /**
@@ -180,15 +221,21 @@ public abstract class LocalStorage<Key, Value, IndexValue> implements Storage<Ke
     public long size() {
         this.cleanupIfNecessary();
 
-        return this.map.values().stream().filter(value -> !value.isExpired()).count();
+        return this.map.values()
+                .stream()
+                .filter(cacheEntry -> !cacheEntry.isExpired())
+                .count();
     }
 
     /**
      * {@inheritDoc}
+     *
+     * <p>Pinned entries are retained. Callers that need to discard them must
+     * explicitly unpin them first.</p>
      */
     @Override
     public void clear() {
-        this.map.clear();
+        this.map.entrySet().removeIf(entry -> !(entry.getValue().isPinned()));
     }
 
     /**
@@ -203,8 +250,82 @@ public abstract class LocalStorage<Key, Value, IndexValue> implements Storage<Ke
      */
     @Override
     public void reIndex(final IndexValue indexValue, final Key previousKey) {
-        this.remove(previousKey);
+        this.forceRemove(previousKey);
         this.index(indexValue);
+    }
+
+    /**
+     * Pins an existing entry so it remains resident in this storage.
+     *
+     * <p>Pinning prevents expiry, ordinary removal and capacity eviction. Writes
+     * remain allowed and preserve the pinned state so an update from another
+     * source can replace the cached value without unlocking it.</p>
+     *
+     * @param key the key whose entry should be pinned
+     */
+    public void pin(final Key key) {
+        this.cleanupIfNecessary();
+
+        final Key resolvedValidKey = this.resolveValidKey(key);
+        if (resolvedValidKey == null) {
+            return;
+        }
+
+        this.map.computeIfPresent(resolvedValidKey, (resolvedKey, cacheEntry) -> cacheEntry.pin());
+    }
+
+    /**
+     * Unpins an existing entry and starts its normal time-to-live from now.
+     *
+     * <p>Once unpinned, the entry may expire, be explicitly removed, or be
+     * selected for capacity eviction normally.</p>
+     *
+     * @param key the key whose entry should be unpinned
+     */
+    public void unpin(final Key key) {
+        this.cleanupIfNecessary();
+
+        final Key resolvedValidKey = this.resolveValidKey(key);
+        if (resolvedValidKey == null) {
+            return;
+        }
+
+        this.map.computeIfPresent(resolvedValidKey, (resolvedKey, cacheEntry) -> cacheEntry.unpin(this.getTTL()));
+    }
+
+    /**
+     * Returns whether an entry is currently pinned.
+     *
+     * @param key the key to inspect
+     * @return {@code true} if an entry exists and is pinned
+     */
+    public boolean isPinned(final Key key) {
+        final Key resolvedValidKey = this.resolveValidKey(key);
+        if (resolvedValidKey == null) {
+            return false;
+        }
+
+        final CacheEntry<Value> cacheEntry = this.map.get(resolvedValidKey);
+
+        return cacheEntry != null && cacheEntry.isPinned();
+    }
+
+    /**
+     * Removes an entry regardless of whether it is pinned.
+     *
+     * <p>Used for structural cache maintenance where an existing mapping is no
+     * longer valid. Unlike {@link #remove(Object)}, pinning does not protect the
+     * entry from this operation.</p>
+     *
+     * @param key the key to remove
+     */
+    protected void forceRemove(final Key key) {
+        final Key resolvedValidKey = this.resolveValidKey(key);
+        if (resolvedValidKey == null) {
+            return;
+        }
+
+        this.map.remove(resolvedValidKey);
     }
 
     /**
@@ -220,33 +341,26 @@ public abstract class LocalStorage<Key, Value, IndexValue> implements Storage<Ke
     }
 
     /**
-     * Removes every expired entry in one pass.
+     * Removes every expired, unpinned entry in one pass.
      *
      * <p>Runs automatically every {@value #CLEANUP_THRESHOLD} operations, and can
      * be called directly to reclaim memory sooner.</p>
      */
     public void cleanup() {
-        this.map.entrySet().removeIf(entry -> entry.getValue().isExpired());
+        this.map.entrySet().removeIf(entry -> !(entry.getValue().isPinned()) && entry.getValue().isExpired());
     }
 
     /**
      * Makes room for one more entry when the storage is at
      * {@link #getMaxSize()}.
      *
-     * <p>Sweeps expired entries first, since those are free to lose. If the
-     * storage is still full every entry is live, so the ones closest to expiring
-     * go — which, since one time-to-live covers the whole storage, is also the
-     * oldest-written ones. That is insertion order rather than
-     * least-recently-used: {@link ConcurrentHashMap} does not track access
-     * order, and the bookkeeping to add it would cost more than the eviction
-     * quality is worth. A time-to-live is the real control over what this
-     * storage holds; the cap is the backstop.</p>
-     *
-     * <p>A storage with no time-to-live has no age to sort on, so its evictions
-     * fall in whatever order the map iterates.</p>
+     * <p>Expired entries are removed first. If the storage remains full, only
+     * unpinned entries participate in capacity eviction; pinned entries are
+     * protected regardless of their expiry value.</p>
      *
      * <p>The check and the eviction are not atomic, so concurrent writers can
-     * overshoot the cap briefly. The next write pulls it back.</p>
+     * overshoot the cap briefly. The next write pulls it back when removable
+     * entries are available.</p>
      */
     private void evictIfNecessary() {
         final int maxSize = this.getMaxSize();
@@ -264,6 +378,7 @@ public abstract class LocalStorage<Key, Value, IndexValue> implements Storage<Ke
 
         this.map.entrySet()
                 .stream()
+                .filter(entry -> !(entry.getValue().isPinned()))
                 .sorted(Comparator.comparingLong(entry -> entry.getValue().getExpireAt()))
                 .limit(excess)
                 .map(Map.Entry::getKey)

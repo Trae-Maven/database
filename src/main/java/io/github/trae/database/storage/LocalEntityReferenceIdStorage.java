@@ -47,7 +47,49 @@ public abstract class LocalEntityReferenceIdStorage<Key, Entity extends io.githu
      */
     @Override
     public void unIndex(final Entity entity) {
-        this.remove(this.getKey(entity));
+        this.forceRemove(this.getKey(entity));
+    }
+
+    /**
+     * Re-indexes an entity under its current key while preserving whether its
+     * previous reference was pinned.
+     *
+     * <p>The previous mapping is removed regardless of its pinned state, since it
+     * no longer represents the entity's current value. The entity is then indexed
+     * under its new key, and the pin is transferred to that new mapping when the
+     * previous one was pinned.</p>
+     *
+     * @param entity      the entity to index under its current key
+     * @param previousKey the key the entity was previously indexed under
+     */
+    @Override
+    public void reIndex(final Entity entity, final Key previousKey) {
+        final boolean pinned = this.isPinned(previousKey);
+
+        this.forceRemove(previousKey);
+        this.index(entity);
+
+        if (pinned) {
+            this.pinEntity(entity);
+        }
+    }
+
+    /**
+     * Pins the reference belonging to an entity.
+     *
+     * @param entity the entity whose reference should be pinned
+     */
+    public final void pinEntity(final Entity entity) {
+        this.pin(this.getKey(entity));
+    }
+
+    /**
+     * Unpins the reference belonging to an entity.
+     *
+     * @param entity the entity whose reference should be unpinned
+     */
+    public final void unpinEntity(final Entity entity) {
+        this.unpin(this.getKey(entity));
     }
 
     /**
