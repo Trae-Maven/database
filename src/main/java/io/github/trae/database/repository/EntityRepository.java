@@ -477,9 +477,8 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
     /**
      * Applies one property's column value onto an entity.
      *
-     * <p>Exists as its own method so the wildcard on a property in the list is
-     * captured into a concrete type, letting the setter accept the fetched
-     * value.</p>
+     * <p>Reads the raw stored value and passes it through the property's
+     * configured converter before applying it to the entity.</p>
      *
      * @param <Value>        the property's value type
      * @param entityProperty the property to apply
@@ -487,7 +486,24 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @param record         the row being read
      */
     private <Value> void apply(final EntityProperty<? super Entity, Value> entityProperty, final Entity entity, final Record record) {
-        entityProperty.getSetter().accept(entity, record.get(entityProperty.getField()));
+        final Object storedValue = record.get(entityProperty.getColumn());
+        final org.jooq.Converter<?, Value> converter = entityProperty.getDataType().getConverter();
+        final Value value = storedValue == null ? null : convert(converter, storedValue);
+
+        entityProperty.getSetter().accept(entity, value);
+    }
+
+    /**
+     * Converts a raw stored value through the property's jOOQ converter.
+     *
+     * @param <Stored>    the stored database type
+     * @param <Value>     the property's Java type
+     * @param converter   the converter to use
+     * @param storedValue the raw stored value
+     * @return the converted Java value
+     */
+    private <Stored, Value> Value convert(final org.jooq.Converter<Stored, Value> converter, final Object storedValue) {
+        return converter.from(converter.fromType().cast(storedValue));
     }
 
     /**
