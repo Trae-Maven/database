@@ -11,6 +11,7 @@ import org.jooq.impl.SQLDataType;
 
 import java.lang.reflect.Type;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Stores an arbitrary object as JSON in a {@code jsonb} column, using Gson for
@@ -22,13 +23,15 @@ import java.util.List;
  * document is comparatively expensive.</p>
  *
  * <p>Generic values need their full type, not just the raw class, or Gson has no
- * element type to deserialise into. {@link #ofList(Class)} builds that type for
- * the common list case; anything more involved can pass a {@link Type} directly
- * through the two-argument constructor.</p>
+ * element type to deserialise into. {@link #ofList(Class)} and
+ * {@link #ofMap(Class, Class)} build that type for the common collection cases;
+ * anything more involved can pass a {@link Type} directly through the
+ * two-argument constructor.</p>
  *
  * <pre>{@code
  * EntityProperty.registerWithConverter(Account.class, "refreshToken", Account::getRefreshToken, Account::setRefreshToken, new JsonValueConverter<>(RefreshToken.class));
  * EntityProperty.registerWithConverter(Account.class, "permissionList", Account::getPermissionList, Account::setPermissionList, JsonValueConverter.ofList(String.class));
+ * EntityProperty.registerWithConverter(Account.class, "settingMap", Account::getSettingMap, Account::setSettingMap, JsonValueConverter.ofMap(String.class, String.class));
  * }</pre>
  *
  * @param <Value> the type being stored as JSON
@@ -68,6 +71,25 @@ public class JsonValueConverter<Value> implements ValueConverter<Value, JSONB> {
     @SuppressWarnings("unchecked")
     public static <Value> JsonValueConverter<List<Value>> ofList(final Class<Value> valueType) {
         return new JsonValueConverter<>((Class<List<Value>>) (Class<?>) List.class, TypeToken.getParameterized(List.class, valueType).getType());
+    }
+
+    /**
+     * Creates a converter for a {@link Map} of the given key and value types,
+     * preserving both through serialisation.
+     *
+     * <p>Gson writes map keys as JSON object names, so the key type should be one
+     * that round-trips through its string form, such as {@link String}, a number,
+     * an enum or a {@link java.util.UUID}.</p>
+     *
+     * @param <Key>     the key type
+     * @param <Value>   the value type
+     * @param keyType   the key class
+     * @param valueType the value class
+     * @return a converter storing a map of those types as JSON
+     */
+    @SuppressWarnings("unchecked")
+    public static <Key, Value> JsonValueConverter<Map<Key, Value>> ofMap(final Class<Key> keyType, final Class<Value> valueType) {
+        return new JsonValueConverter<>((Class<Map<Key, Value>>) (Class<?>) Map.class, TypeToken.getParameterized(Map.class, keyType, valueType).getType());
     }
 
     /**
