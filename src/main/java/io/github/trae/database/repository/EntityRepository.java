@@ -128,6 +128,10 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
             throw new IllegalArgumentException("Class '%s' has no constructor taking a %s".formatted(entityType.getName(), UUID.class.getSimpleName()), e);
         }
 
+        this.createTable();
+        this.migrateSchema();
+        this.createIndexes();
+
         DatabaseApi.addRepository(this);
     }
 

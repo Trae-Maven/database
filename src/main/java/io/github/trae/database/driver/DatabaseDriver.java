@@ -96,12 +96,6 @@ public abstract class DatabaseDriver implements Connector {
         this.batchQueue = new BatchQueue(this.dslContext, this.batchQueueSettings);
 
         this.dslContext.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
-
-        for (final EntityRepository<?> entityRepository : DatabaseApi.getRepositoryList()) {
-            entityRepository.createTable();
-            entityRepository.migrateSchema();
-            entityRepository.createIndexes();
-        }
     }
 
     /**
