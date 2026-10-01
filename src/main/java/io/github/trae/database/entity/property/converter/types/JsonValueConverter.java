@@ -12,6 +12,7 @@ import org.jooq.impl.SQLDataType;
 import java.lang.reflect.Type;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Stores an arbitrary object as JSON in a {@code jsonb} column, using Gson for
@@ -23,14 +24,15 @@ import java.util.Map;
  * document is comparatively expensive.</p>
  *
  * <p>Generic values need their full type, not just the raw class, or Gson has no
- * element type to deserialise into. {@link #ofList(Class)} and
- * {@link #ofMap(Class, Class)} build that type for the common collection cases;
- * anything more involved can pass a {@link Type} directly through the
+ * element type to deserialise into. {@link #ofList(Class)}, {@link #ofSet(Class)}
+ * and {@link #ofMap(Class, Class)} build that type for the common collection
+ * cases; anything more involved can pass a {@link Type} directly through the
  * two-argument constructor.</p>
  *
  * <pre>{@code
  * EntityProperty.registerWithConverter(Account.class, "refreshToken", Account::getRefreshToken, Account::setRefreshToken, new JsonValueConverter<>(RefreshToken.class));
  * EntityProperty.registerWithConverter(Account.class, "permissionList", Account::getPermissionList, Account::setPermissionList, JsonValueConverter.ofList(String.class));
+ * EntityProperty.registerWithConverter(Account.class, "flagSet", Account::getFlagSet, Account::setFlagSet, JsonValueConverter.ofSet(AccountFlag.class));
  * EntityProperty.registerWithConverter(Account.class, "settingMap", Account::getSettingMap, Account::setSettingMap, JsonValueConverter.ofMap(String.class, String.class));
  * }</pre>
  *
@@ -71,6 +73,22 @@ public class JsonValueConverter<Value> implements ValueConverter<Value, JSONB> {
     @SuppressWarnings("unchecked")
     public static <Value> JsonValueConverter<List<Value>> ofList(final Class<Value> valueType) {
         return new JsonValueConverter<>((Class<List<Value>>) (Class<?>) List.class, TypeToken.getParameterized(List.class, valueType).getType());
+    }
+
+    /**
+     * Creates a converter for a {@link Set} of the given element type,
+     * preserving the element type through serialisation.
+     *
+     * <p>Stored as a JSON array. Gson reads it back as a {@link java.util.LinkedHashSet},
+     * so the order the elements were written in is kept.</p>
+     *
+     * @param <Value>   the element type
+     * @param valueType the element class
+     * @return a converter storing a set of that element type as JSON
+     */
+    @SuppressWarnings("unchecked")
+    public static <Value> JsonValueConverter<Set<Value>> ofSet(final Class<Value> valueType) {
+        return new JsonValueConverter<>((Class<Set<Value>>) (Class<?>) Set.class, TypeToken.getParameterized(Set.class, valueType).getType());
     }
 
     /**
