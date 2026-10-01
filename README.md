@@ -1,6 +1,6 @@
 # Database
 
-A PostgreSQL data-access library built on jOOQ, with declarative property mapping, deferred batched writes, and tiered local → Redis → database lookups with request coalescing.
+A PostgreSQL data-access library built on jOOQ, with declarative property mapping, deferred batched writes, tiered local → Redis → database lookups with request coalescing, and built-in tenant scoping.
 
 Database removes the boilerplate around persistence. Declare an entity's columns once as property constants, extend a repository, and you get schema creation, migration, indexes, reads, writes and caching without writing a query or a mapper.
 
@@ -8,23 +8,25 @@ Database removes the boilerplate around persistence. Declare an entity's columns
 
 ## Features
 
-- **Property-driven mapping** — declare each column once as an `EntityProperty` constant holding its name, getter, setter and SQL type; the framework derives the schema, the reads and the writes from that
-- **Repository pattern** — extend `EntityRepository` for CRUD, condition and property-based finders, paging, existence checks and counts, with no per-entity query code
-- **Schema management** — `createTable`, `migrateSchema`, `dropTable` and `createIndexes` generated from the registered properties and run automatically when the driver connects
-- **Index declaration** — override `getIndexes()` to map properties to a `BTREE`, `GIN_TRGM` or `BRIN` index; the `pg_trgm` extension is installed on connect
-- **Value converters** — store any Java type in any column type through a `ValueConverter`; enum and JSON converters are built in, and conversion happens transparently on both read and write
-- **Deferred batched writes** — every write goes through a `BatchQueue` that coalesces writes to the same entity, orders them by arrival, and commits them in chunked transactions on its own thread
-- **Statement batching** — runs of identical SQL within a transaction execute as a single JDBC batch, which pgjdbc rewrites into one multi-row statement
-- **Tiered lookups** — `LookupProvider` walks local storage, then Redis, then the database, caching what it finds on the way back
-- **Request coalescing** — concurrent identical lookups share one piece of work instead of stampeding the database, with synchronous and asynchronous callers joining the same in-flight request
-- **Virtual thread execution** — lookups run on virtual threads, so blocking JDBC and Redis calls never occupy a platform thread or a fixed pool
-- **Local storage** — `ConcurrentHashMap`-backed cache with per-storage TTL, lazy eviction on read, a periodic sweep and an optional size cap, with no background scheduler
-- **Redis storage** — Lettuce-backed distributed cache with native TTL, a per-namespace key index enabling iteration without `SCAN`, chunked `MGET` retrieval and automatic eviction of values that no longer decode
-- **Reference storages** — a secondary key maps to an entity's identifier rather than a second copy of the entity, so one cached entity serves every path to it
-- **Coordinated writes** — `updateEntity` drops the stale reference entries, applies the change, re-caches, writes only the columns that actually moved, and tells every other instance which ones they were
-- **Cross-instance invalidation** — every holder publishes its changes on a channel named after its entity and subscribes to the same one, so a multi-instance deployment keeps its local caches honest without any wiring of your own
-- **Redis pub/sub** — publish and subscribe on the same driver, used by the update channel and available directly for anything else
-- **Framework-agnostic** — no Spring or dependency-injection annotations anywhere in the library; annotate your own classes for whichever container you use
+- **Property-driven mapping**: declare each column once as an `EntityProperty` constant holding its name, getter, setter and SQL type; the framework derives the schema, the reads and the writes from that
+- **Repository pattern**: extend `EntityRepository` for CRUD, condition and property-based finders, paging, existence checks and counts, with no per-entity query code
+- **Schema management**: `createTable`, `migrateSchema`, `dropTable` and `createIndexes` generated from the registered properties and run automatically when each repository is constructed
+- **Index declaration**: override `getIndexes()` to map properties to a `BTREE`, `GIN_TRGM` or `BRIN` index; the `pg_trgm` extension is installed when the driver connects
+- **Value converters**: store any Java type in any column type through a `ValueConverter`; enum and JSON converters are built in, and conversion happens transparently on both read and write
+- **Deferred batched writes**: every write goes through a `BatchQueue` that coalesces writes to the same entity, orders them by arrival, and commits them in chunked transactions on its own thread
+- **Statement batching**: runs of identical SQL within a transaction execute as a single JDBC batch, which pgjdbc rewrites into one multi-row statement
+- **Tiered lookups**: `LookupProvider` walks local storage, then Redis, then the database, caching what it finds on the way back
+- **Request coalescing**: concurrent identical lookups share one piece of work instead of stampeding the database, with synchronous and asynchronous callers joining the same in-flight request
+- **Virtual thread execution**: lookups run on virtual threads, so blocking JDBC and Redis calls never occupy a platform thread or a fixed pool
+- **Local storage**: `ConcurrentHashMap`-backed cache with per-storage TTL, lazy eviction on read, a periodic sweep and an optional size cap, with no background scheduler
+- **Redis storage**: Lettuce-backed distributed cache with native TTL, a per-namespace key index enabling iteration without `SCAN`, chunked `MGET` retrieval and automatic eviction of values that no longer decode
+- **Reference storages**: a secondary key maps to an entity's identifier rather than a second copy of the entity, so one cached entity serves every path to it
+- **Coordinated writes**: `updateEntity` drops the stale reference entries, applies the change, re-caches, writes only the columns that actually moved, and tells every other instance which ones they were
+- **Cross-instance invalidation**: every holder publishes its changes on a channel named after its entity and subscribes to the same one, so a multi-instance deployment keeps its local caches honest without any wiring of your own
+- **Tenant scoping**: implement `TenantEntity` and every read, write, cache tier and update message is scoped to the driver's tenant automatically, with rows shared across tenants marked `*`; consumer code never filters by tenant
+- **Database-scoped Redis**: every Redis key and namespace is prefixed with the database name, so several databases sharing one Redis never share cache entries
+- **Redis pub/sub**: publish and subscribe on the same driver, used by the update channel and available directly for anything else
+- **Framework-agnostic**: no Spring or dependency-injection annotations anywhere in the library; annotate your own classes for whichever container you use
 
 ---
 
@@ -43,7 +45,7 @@ Your project must already include the following dependency:
 
 Lombok is marked as **provided** inside Database because it is expected to already exist in your application.
 
-Java 21 or later is required — the library uses virtual threads and sequenced collections.
+Java 21 or later is required, since the library uses virtual threads and sequenced collections.
 
 ---
 
@@ -51,12 +53,12 @@ Java 21 or later is required — the library uses virtual threads and sequenced 
 
 These are pulled in automatically when you install Database and do not need to be added manually.
 
-- [Utilities](https://github.com/Trae-Maven/utilities) — shared helper classes used internally by the framework
-- `org.jooq:jooq` — SQL construction, type binding and value conversion
-- `org.postgresql:postgresql` — the PostgreSQL JDBC driver
-- `com.zaxxer:HikariCP` — connection pooling
-- `io.lettuce:lettuce-core` — Redis client
-- `com.google.code.gson:gson` — JSON encoding for the JSON value converter
+- [Utilities](https://github.com/Trae-Maven/utilities): shared helper classes used internally by the framework
+- `org.jooq:jooq`: SQL construction, type binding and value conversion
+- `org.postgresql:postgresql`: the PostgreSQL JDBC driver
+- `com.zaxxer:HikariCP`: connection pooling
+- `io.lettuce:lettuce-core`: Redis client
+- `com.google.code.gson:gson`: JSON encoding for the JSON value converter
 
 ---
 
@@ -87,7 +89,7 @@ Per entity: the entity itself, a property holder, and a repository. Add a storag
 
 ### 1. Define Your Entity
 
-Implement `Entity` and declare a constructor taking the identifier — the repository uses it to rebuild entities from result rows.
+Implement `Entity` and declare a constructor taking the identifier. The repository uses it to rebuild entities from result rows.
 
 ```java
 @RequiredArgsConstructor
@@ -119,7 +121,8 @@ public class AccountProperty {
             "email",
             Account::getEmail,
             Account::setEmail,
-            SQLDataType.VARCHAR
+            SQLDataType.VARCHAR,
+            true
     );
 
     public static final EntityProperty<Account, String> PASSWORD = EntityProperty.register(
@@ -127,7 +130,8 @@ public class AccountProperty {
             "password",
             Account::getPassword,
             Account::setPassword,
-            SQLDataType.VARCHAR
+            SQLDataType.VARCHAR,
+            true
     );
 
     public static final EntityProperty<Account, Long> CREATED_AT = EntityProperty.register(
@@ -135,7 +139,8 @@ public class AccountProperty {
             "createdAt",
             Account::getCreatedAt,
             Account::setCreatedAt,
-            SQLDataType.BIGINT
+            SQLDataType.BIGINT,
+            true
     );
 
     public static final EntityProperty<Account, AccountRole> ROLE = EntityProperty.registerWithConverter(
@@ -143,7 +148,8 @@ public class AccountProperty {
             "role",
             Account::getRole,
             Account::setRole,
-            new EnumValueConverter<>(AccountRole.class)
+            new EnumValueConverter<>(AccountRole.class),
+            true
     );
 
     public static final EntityProperty<Account, RefreshToken> REFRESH_TOKEN = EntityProperty.registerWithConverter(
@@ -151,12 +157,21 @@ public class AccountProperty {
             "refreshToken",
             Account::getRefreshToken,
             Account::setRefreshToken,
-            new JsonValueConverter<>(RefreshToken.class)
+            new JsonValueConverter<>(RefreshToken.class),
+            true
     );
 }
 ```
 
-Registration happens in the holder's static initialiser, so the class must be loaded before the repository does any schema or read work. Referencing any one constant is enough.
+The final argument marks the property persistent. A non-persistent property has no column: it is never written or read by the repository, but it still takes part in caching and in update propagation between instances, which suits runtime state such as a chat channel or an online flag.
+
+Registration happens in the holder's static initialiser, so the class must be loaded before the repository does any schema or read work. Load it from the repository's own static initialiser, which runs before the constructor:
+
+```java
+static {
+    EntityProperty.loadPropertyType(AccountProperty.class);
+}
+```
 
 ### 3. Create Your Repository
 
@@ -183,7 +198,7 @@ public class AccountRepository extends EntityRepository<Account> {
 }
 ```
 
-The repository registers itself with `DatabaseApi` on construction. Build every repository first, then call `connect()` — that is when tables, columns and indexes are brought up to date.
+The repository creates its table, migrates its columns and builds its indexes in its constructor, then registers itself with `DatabaseApi`. The driver must therefore be connected before any repository is built.
 
 ### 4. Add Cached Lookups
 
@@ -211,13 +226,13 @@ public class AccountManager implements EntityHolder<Account, AccountRepository> 
         this.repository = repository;
 
         this.idLocalStorage = new AccountIdLocalStorage();
-        this.idRedisStorage = new AccountIdRedisStorage(redisDriver);
+        this.idRedisStorage = new AccountIdRedisStorage(redisDriver, repository);
 
         this.emailLocalStorage = new AccountEmailLocalStorage();
-        this.emailRedisStorage = new AccountEmailRedisStorage(redisDriver);
+        this.emailRedisStorage = new AccountEmailRedisStorage(redisDriver, repository);
 
         this.usernameLocalStorage = new AccountUsernameLocalStorage();
-        this.usernameRedisStorage = new AccountUsernameRedisStorage(redisDriver);
+        this.usernameRedisStorage = new AccountUsernameRedisStorage(redisDriver, repository);
 
         this.lookupProvider = new LookupProvider<>(this);
 
@@ -272,13 +287,16 @@ public class AccountManager implements EntityHolder<Account, AccountRepository> 
 }
 ```
 
-`@Getter` satisfies `getRepository()`, `getIdLocalStorage()`, `getIdRedisStorage()` and `getLookupProvider()`, so the only methods left to write are the three cache hooks:
+`@Getter` satisfies `getRepository()`, `getIdLocalStorage()`, `getIdRedisStorage()` and `getLookupProvider()`. The identifier tiers are handled by the defaults, so the hooks only need overriding to add reference storages:
 
 | Hook | Called when | Should do |
 |---|---|---|
-| `cacheEntity` | a lookup found the entity further down the tiers, or a write just changed it | index it in every tier, local and Redis, under every key that points at it |
-| `evictEntity` | another instance reported a change | drop the local copies only, leaving Redis holding the fresh one the next lookup reads |
-| `deleteStaleStorage` | a property is about to change, or just changed elsewhere | un-index the reference entries that property owns, while the entity still holds the old value |
+| `cacheLocalEntity` / `cacheRedisEntity` | a lookup found the entity further down the tiers, or a write just changed it | index it in that tier under every key that points at it |
+| `evictLocalEntity` / `evictRedisEntity` | the entity is gone, or this instance's copy is stale with nothing to replace it | un-index it from that tier under every key |
+| `pinLocalEntity` / `unpinLocalEntity` | the entity becomes actively owned by this instance, or stops being | pin or unpin every local entry, so it cannot expire while in use |
+| `deleteStaleLocalStorage` / `deleteStaleRedisStorage` | a property is about to change, or just changed elsewhere | un-index the reference entries that property owns, while the entity still holds the old value |
+
+`cacheEntity` and `evictEntity` call both tiers' hooks, so they rarely need overriding themselves.
 
 `listenForEntityUpdates()` in the constructor subscribes the manager to the update channel. Without it the instance still writes correctly, it just never hears about anyone else's writes.
 
@@ -291,9 +309,9 @@ accountManager.getEntityByIdAsynchronously(id).thenAccept(accountOptional -> acc
 final boolean exists = accountManager.getEntityByIdSynchronously(id).isPresent();
 ```
 
-There is no separate existence check, because a caller who has one almost always wants the entity a line later — and a lookup leaves it cached where a bare `EXISTS` would not. Call `repository.exists(id)` directly for the rare check that should not warm the caches.
+There is no separate existence check, because a caller who has one almost always wants the entity a line later, and a lookup leaves it cached where a bare `EXISTS` would not. Call `repository.exists(id)` directly for the rare check that should not warm the caches.
 
-A lookup by anything other than the identifier runs in two legs — the secondary key resolves to an identifier, and the identifier resolves to the entity. `getEntityByKeySynchronously` and `getEntityByKeyAsynchronously` compose both, so a manager wraps them once per key it supports:
+A lookup by anything other than the identifier runs in two legs: the secondary key resolves to an identifier, and the identifier resolves to the entity. `getEntityByKeySynchronously` and `getEntityByKeyAsynchronously` compose both, so a manager wraps them once per key it supports:
 
 ```java
 public Optional<Account> getEntityByEmailSynchronously(final String email) {
@@ -305,7 +323,7 @@ public CompletableFuture<Optional<Account>> getEntityByEmailAsynchronously(final
 }
 ```
 
-Each leg coalesces on its own, so a hundred callers asking by email produce one email lookup and one identifier lookup between them — and the entity itself is cached once, under its identifier, however many keys point at it. The identifier leg usually hits local storage, so the second hop costs a map read rather than a round trip; a fully cold read is the case that pays for both.
+Each leg coalesces on its own, so a hundred callers asking by email produce one email lookup and one identifier lookup between them, and the entity itself is cached once, under its identifier, however many keys point at it. The identifier leg usually hits local storage, so the second hop costs a map read rather than a round trip; a fully cold read is the case that pays for both.
 
 ---
 
@@ -361,10 +379,10 @@ The declared list drives everything: which reference entries are dropped, which 
 What happens, in order:
 
 1. each declared property's current value is read and kept
-2. `deleteStaleStorage` runs for each of them, while the entity still holds the values its indexes were built from
+2. `deleteStaleLocalStorage` and `deleteStaleRedisStorage` run for each of them, while the entity still holds the values its indexes were built from
 3. the runnable applies the change
 4. the values are compared, and only the properties that actually moved survive
-5. `cacheEntity` re-indexes the entity under its new values
+5. `cacheEntity` re-indexes the entity under its new values, re-pinning it if it was pinned
 6. the repository writes the changed columns
 7. the changed column names are published on the entity's update channel
 
@@ -412,9 +430,82 @@ On a request thread, prefer the synchronous forms. The asynchronous ones complet
 
 ---
 
+## Tenancy
+
+A tenant is one instance of a group that shares a database, such as three instances of the same game server writing to one schema. Implement `TenantEntity` instead of `Entity` and the library scopes that entity to the driver's tenant everywhere, with no tenant appearing in consumer code.
+
+```java
+@Getter
+@Setter
+public class Zone implements TenantEntity {
+
+    private final UUID id;
+
+    private String tenantId;
+
+    private String name;
+
+    public Zone(final UUID id) {
+        this.id = id;
+    }
+}
+```
+
+The reading tenant comes from the driver. Override `getTenantId()` on the subclass; the default of `null` means standalone, and applies no scoping at all.
+
+```java
+public class MyLocalDatabaseDriver extends DatabaseDriver {
+
+    private final String tenantId;
+
+    public MyLocalDatabaseDriver(final DatabaseConfig databaseConfig, final String tenantId) {
+        super(databaseConfig.toHikariConfig(), new BatchQueueSettings());
+
+        this.tenantId = tenantId;
+
+        this.connect();
+    }
+
+    @Override
+    public String getTenantId() {
+        return this.tenantId;
+    }
+}
+```
+
+A row's tenant is either `*`, shared by every tenant reading that table, or a tenant's own name. A tenant sees the shared rows plus its own, and never another tenant's.
+
+| Layer | What tenancy does |
+|---|---|
+| **Schema** | A `tenant_id` column is added alongside `id`, `NOT NULL DEFAULT '*'` and BTREE-indexed, so rows that predate it become shared |
+| **Writes** | `save` writes the entity's tenant; a `null` tenant is stored as `*` |
+| **Reads** | Every repository read is scoped to `tenant_id IN ('*', <tenant>)`; a subclass's own query wraps its condition in `scope(...)` to match |
+| **Identifier cache** | The tenant is stored with the entity in Redis and restored on read, and an entity from another tenant is treated as a miss |
+| **Reference keys** | Redis reference keys are prefixed with the entity's tenant, and a lookup tries the reader's own tenant key before the shared one |
+| **Bulk reads** | `keys()`, `values()`, `size()` and `clear()` on a tenant-scoped storage only see entries visible to the tenant |
+| **Updates** | An update for an entity the receiving tenant cannot see is dropped rather than cached |
+
+The tenant column is owned by the repository. Do not register a `tenant_id` property: it is written on every save and read on every build already, and a second registration fails the table creation. The tenant is not expected to change, so `updateEntity` never needs it; to move an entity between tenants, `save` it.
+
+### One row per tenant per player
+
+The primary key is the identifier alone, so two tenants cannot both own a row whose identifier is a player's UUID. When every tenant needs its own row for the same player, derive the identifier from the tenant and the player, and keep the player in a column of its own:
+
+```java
+public static UUID createId(final String tenantId, final UUID playerId) {
+    return UUID.nameUUIDFromBytes("%s:%s".formatted(tenantId, playerId).getBytes(StandardCharsets.UTF_8));
+}
+```
+
+The derivation is deterministic, so a lookup by player is a lookup by computed identifier: no reference storage and no second leg. The primary key also guarantees one row per tenant per player, which a random identifier could not. The identifier is an internal storage key, so a manager should expose lookups by player only.
+
+A tenant's name must never change once it holds data. Every derived identifier depends on it, so renaming a tenant orphans every row it owns.
+
+---
+
 ## Value Converters
 
-A `ValueConverter<Value, Stored>` describes how a Java value is stored in a column of a different type. The converter chooses the storage type, and jOOQ applies the conversion on every bind and every fetch — nothing downstream is aware it exists.
+A `ValueConverter<Value, Stored>` describes how a Java value is stored in a column of a different type. The converter chooses the storage type, and jOOQ applies the conversion on every bind and every fetch, so nothing downstream is aware it exists.
 
 Two are built in:
 
@@ -427,7 +518,7 @@ Two are built in:
 // A nested object
 new JsonValueConverter<>(RefreshToken.class)
 
-// A generic collection — the element type is preserved
+// A generic collection, keeping the element type
 JsonValueConverter.ofList(String.class)
 ```
 
@@ -469,11 +560,11 @@ JSONB is one column and tolerates shape changes, but its inner fields cannot be 
 
 ## Schema Management
 
-The schema is derived from the registered properties — each carries its own `DataType`, including any converter's storage type. All four operations live on the repository and the first three run automatically on connect.
+The schema is derived from the registered properties, each of which carries its own `DataType`, including any converter's storage type. All four operations live on the repository and the first three run automatically when it is constructed.
 
 | Method | Behaviour |
 |---|---|
-| `createTable` | `CREATE TABLE IF NOT EXISTS` with a column per property and the identifier as primary key |
+| `createTable` | `CREATE TABLE IF NOT EXISTS` with a column per persistent property, the identifier as primary key, and `tenant_id` for a `TenantEntity` |
 | `migrateSchema` | `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for every property, additive only |
 | `createIndexes` | Creates each index declared by `getIndexes()` if it does not exist |
 | `dropTable` | `DROP TABLE IF EXISTS` |
@@ -495,7 +586,7 @@ protected Map<EntityProperty<Account, ?>, IndexType> getIndexes() {
 
 | Type | Index | Use |
 |---|---|---|
-| `BTREE` | B-tree | Equality, ranges and ordering — the right choice for almost every column |
+| `BTREE` | B-tree | Equality, ranges and ordering; the right choice for almost every column |
 | `GIN_TRGM` | GIN with trigram operators | Substring and similarity search, the kind a `LIKE '%term%'` performs |
 | `BRIN` | Block range | Range scans on a large append-only table whose values correlate with physical order; cannot serve an ordering |
 
@@ -511,6 +602,7 @@ Writes land in a map keyed by table and identifier, so a burst of edits to one e
 
 ```java
 final BatchQueueSettings settings = new BatchQueueSettings();
+
 settings.setFlushIntervalMillis(500L);
 settings.setChunkSize(1_000);
 ```
@@ -524,7 +616,7 @@ settings.setChunkSize(1_000);
 | `commitWarnBaseMillis` | `150` | Fixed part of the commit warning threshold |
 | `commitWarnPerWriteMillis` | `1` | Per-write part, added once for each write in the chunk |
 
-The commit threshold scales with the write count deliberately — a commit costs a fixed fsync plus per-statement time, so a fixed ceiling would warn about a large chunk simply for being large.
+The commit threshold scales with the write count deliberately: a commit costs a fixed fsync plus per-statement time, so a fixed ceiling would warn about a large chunk simply for being large.
 
 | Behaviour | Detail |
 |---|---|
@@ -543,13 +635,13 @@ Three type parameters, because what a storage holds is separate from the entity 
 
 | Parameter | Meaning |
 |---|---|
-| `Key` | What entries are stored under — a `UUID`, an email, a username |
-| `Value` | What is held under that key — the entity itself, or an identifier pointing at it |
+| `Key` | What entries are stored under, such as a `UUID`, an email or a username |
+| `Value` | What is held under that key: the entity itself, or an identifier pointing at it |
 | `IndexValue` | The entity the index rules operate on, always the entity |
 
-A primary storage keys an entity on its identifier and holds the entity, so `Value` and `IndexValue` coincide. A secondary storage keys on an email or a username and holds only the identifier — `index` still needs the whole entity to derive both sides of the mapping, which is why the third parameter exists.
+A primary storage keys an entity on its identifier and holds the entity, so `Value` and `IndexValue` coincide. A secondary storage keys on an email or a username and holds only the identifier, but `index` still needs the whole entity to derive both sides of the mapping, which is why the third parameter exists.
 
-`reIndex(indexValue, previousKey)` is part of that contract. When the value a storage keys on changes — an account's email being updated — the entity must be moved, or it stays reachable under the stale key until the entry expires. The entity is passed in already holding its new value, with the old key supplied separately because it can no longer be derived.
+`reIndex(indexValue, previousKey)` is part of that contract. When the value a storage keys on changes, such as an account's email being updated, the entity must be moved, or it stays reachable under the stale key until the entry expires. The entity is passed in already holding its new value, with the old key supplied separately because it can no longer be derived.
 
 `resolveKey` normalises keys on both sides of every operation, so a storage keyed on something case-insensitive overrides it once rather than relying on callers to pass a consistent form.
 
@@ -576,9 +668,9 @@ public String resolveKey(final String key) {
 }
 ```
 
-Entries expire by the storage's TTL, applied on write; reads do not extend it. There is no background scheduler — expired entries are dropped when read, and a full sweep runs every 100 operations.
+Entries expire by the storage's TTL, applied on write; reads do not extend it. There is no background scheduler: expired entries are dropped when read, and a full sweep runs every 100 operations.
 
-A storage is unbounded unless `getMaxSize()` is overridden, which suits a working set with a natural ceiling — the players on a server. A storage a public endpoint can reach caches whatever gets requested, so it wants a bound:
+A storage is unbounded unless `getMaxSize()` is overridden, which suits a working set with a natural ceiling, such as the players on a server. A storage a public endpoint can reach caches whatever gets requested, so it wants a bound:
 
 ```java
 @Override
@@ -587,59 +679,43 @@ public int getMaxSize() {
 }
 ```
 
-A write is never refused. At capacity the storage sweeps expired entries first, and if that frees nothing it drops the entries closest to expiring — which, since one TTL covers the whole storage, is also the oldest-written ones. That is insertion order rather than least-recently-used: `ConcurrentHashMap` does not track access order, and the bookkeeping to add it would cost more than the eviction quality is worth. A TTL is the real control over what a storage holds; the cap is the backstop.
+A write is never refused. At capacity the storage sweeps expired entries first, and if that frees nothing it drops the entries closest to expiring, which, since one TTL covers the whole storage, are also the oldest-written ones. That is insertion order rather than least-recently-used: `ConcurrentHashMap` does not track access order, and the bookkeeping to add it would cost more than the eviction quality is worth. A TTL is the real control over what a storage holds; the cap is the backstop.
 
 ### RedisStorage
 
-Lettuce-backed and shared across every instance pointing at the same Redis. Keys are prefixed with a namespace, and each namespace keeps its own Redis set of member keys — that index is what makes `keys()`, `values()` and `size()` possible without a `SCAN`.
+Lettuce-backed and shared across every instance pointing at the same Redis. Keys are prefixed with a namespace, and each namespace keeps its own Redis set of member keys, and that index is what makes `keys()`, `values()` and `size()` possible without a `SCAN`.
+
+The identifier tier is `IdRedisStorage`, which takes the repository so it can derive its namespace from the database name and the entity type, store entities as JSON, and apply tenant visibility. A subclass supplies only the TTL:
 
 ```java
-public class AccountIdRedisStorage extends RedisStorage<Account, Account> {
+public class AccountIdRedisStorage extends IdRedisStorage<Account> {
 
-    public AccountIdRedisStorage(final MyRedisDriver redisDriver) {
-        super(redisDriver, "account:id");
+    public AccountIdRedisStorage(final MyRedisDriver redisDriver, final AccountRepository accountRepository) {
+        super(redisDriver, accountRepository);
     }
 
     @Override
     public Duration getTTL() {
         return Duration.ofMinutes(30);
     }
-
-    @Override
-    public void index(final Account account) {
-        this.put(account.getId().toString(), account);
-    }
-
-    @Override
-    public void unIndex(final Account account) {
-        this.remove(account.getId().toString());
-    }
-
-    @Override
-    protected String serialize(final Account account) {
-        return GSON.toJson(account);
-    }
-
-    @Override
-    protected Account deserialize(final String value) {
-        return GSON.fromJson(value, Account.class);
-    }
 }
 ```
 
-**Key format:** `{namespace}:{key}` — e.g. `account:id:8f14e45f-...`, with the namespace index at `{namespace}:__index`.
+**Key format:** `{namespace}:{key}`, such as `overlands_global:account:id:8f14e45f-...`, with the namespace index at `{namespace}:__index`. The database name leads every namespace the library builds, so two databases holding the same entity type never share entries through one Redis.
+
+A subclass of `RedisStorage` can override `getVisibility()` to expose only some of a namespace's entries. Every read then applies it: `get` and `contains` report a hidden entry as absent, `keys`, `values` and `size` skip it, and `clear` removes visible entries only. Hidden entries are never evicted, since they are valid for whoever can see them. The built-in storages use this for tenant scoping.
 
 Redis expires individual entries but cannot remove them from a set, so the index outlives some of the entries it names. `keys()`, `values()` and `size()` prune as they go; a `get` or `contains` miss leaves the index alone, since the vast majority of misses are keys that were never cached and pruning each one would double the cost of every cold lookup.
 
 Those three methods read the whole namespace, in 512-key batches so no single command blocks Redis, and deserialise every value they find. They are proportional to the namespace size and belong in administrative paths, not on a per-request lookup.
 
-A value that will not deserialise — whether it throws or decodes to `null` — is treated as a miss and evicted rather than returned, so a schema change poisons nothing and nothing is left behind to fail the same way on the next read. The entity is simply refetched from the database and cached again in its new shape.
+A value that will not deserialise, whether it throws or decodes to `null`, is treated as a miss and evicted rather than returned, so a schema change poisons nothing and nothing is left behind to fail the same way on the next read. The entity is simply refetched from the database and cached again in its new shape.
 
-`reIndex` matters more here than on the local tier — a stale Redis key serves the old entity to every server on the network, not just the one that wrote it.
+`reIndex` matters more here than on the local tier, because a stale Redis key serves the old entity to every server on the network, not just the one that wrote it.
 
 ### Reference Storages
 
-A secondary key — an email, a username — maps to an entity's **identifier**, not to a second copy of the entity. `LocalEntityReferenceIdStorage` and `RedisEntityReferenceIdStorage` implement that mapping, leaving only `getKey` to write:
+A secondary key, such as an email or a username, maps to an entity's **identifier**, not to a second copy of the entity. `LocalEntityReferenceIdStorage` and `RedisEntityReferenceIdStorage` implement that mapping, leaving only `getKey` to write:
 
 ```java
 public class AccountEmailLocalStorage extends LocalEntityReferenceIdStorage<String, Account> {
@@ -664,8 +740,8 @@ public class AccountEmailLocalStorage extends LocalEntityReferenceIdStorage<Stri
 ```java
 public class AccountEmailRedisStorage extends RedisEntityReferenceIdStorage<Account> {
 
-    public AccountEmailRedisStorage(final MyRedisDriver redisDriver) {
-        super(redisDriver, "account:email");
+    public AccountEmailRedisStorage(final MyRedisDriver redisDriver, final AccountRepository accountRepository) {
+        super(redisDriver, accountRepository, "account:email");
     }
 
     @Override
@@ -685,11 +761,11 @@ public class AccountEmailRedisStorage extends RedisEntityReferenceIdStorage<Acco
 }
 ```
 
-The Redis form serialises identifiers as their canonical string, so a malformed value can only come from something outside the class having written the key — and is evicted like any other value that will not decode.
+The Redis form takes the repository too, prefixing the namespace with the database name, and for a `TenantEntity` prefixing every key with the entity's tenant. It serialises identifiers as their canonical string, so a malformed value can only come from something outside the class having written the key, and is evicted like any other value that will not decode.
 
 Storing the entity in each storage instead would mean a copy per key to keep in step on every write, and copies that drift apart the moment one is refreshed and another is not. The cost of the indirection is a second hop, which is a map lookup locally and usually a cache hit on the identifier leg.
 
-An entity with no key — an account with no email set — is skipped, since a null key is a no-op on both tiers.
+An entity with no key, such as an account with no email set, is skipped, since a null key is a no-op on both tiers.
 
 ### Local vs Redis
 
@@ -698,7 +774,7 @@ An entity with no key — an account with no email set — is skipped, since a n
 | **Backing store** | `ConcurrentHashMap` | Redis via Lettuce |
 | **TTL mechanism** | `CacheEntry` with a monotonic expiry | Native `SET ... PX` |
 | **Key type** | Any object | `String` |
-| **Serialisation** | None — stores Java objects directly | Subclass-supplied |
+| **Serialisation** | None, stores Java objects directly | Subclass-supplied |
 | **Scope** | Single JVM instance | Shared across all instances |
 | **Eviction** | Lazy on read, a sweep every 100 operations, and an optional size cap | Handled by Redis, plus corrupt-value eviction on read |
 | **Use case** | Hot data, same-instance caching | Distributed caching, cross-instance state |
@@ -709,9 +785,9 @@ An entity with no key — an account with no email set — is skipped, since a n
 
 `LookupProvider` solves two problems at once: tier order, and the stampede.
 
-A lookup tries local storage, then Redis, then the database, caching whatever it finds on the way back. While that is happening, the lookup is registered in an in-flight map — so a hundred callers asking for the same uncached entity produce one query, not a hundred. The first caller does the work and the rest wait on its result.
+A lookup tries local storage, then Redis, then the database, caching whatever it finds on the way back. While that is happening, the lookup is registered in an in-flight map, so a hundred callers asking for the same uncached entity produce one query, not a hundred. The first caller does the work and the rest wait on its result.
 
-Lookups come in two shapes. An identifier lookup resolves straight to the entity. A lookup by anything else resolves to an identifier, and the caller feeds that into the identifier lookup — so one cached copy of the entity serves every path to it, and each leg coalesces on its own.
+Lookups come in two shapes. An identifier lookup resolves straight to the entity. A lookup by anything else resolves to an identifier, and the caller feeds that into the identifier lookup, so one cached copy of the entity serves every path to it, and each leg coalesces on its own.
 
 Every method exists in both forms, and both share the same in-flight registration:
 
@@ -724,19 +800,19 @@ Every method exists in both forms, and both share the same in-flight registratio
 | `lookupAllValuesSynchronously` | `List<Entity>`, blocking |
 | `lookupAllValuesAsynchronously` | `CompletableFuture<List<Entity>>` |
 
-These are the plumbing. A manager calls `getEntityById*` and `getEntityByKey*` on its `EntityHolder` instead — those wrap the tier walks above and compose the two legs of a secondary lookup for you.
+These are the plumbing. A manager calls `getEntityById*` and `getEntityByKey*` on its `EntityHolder` instead, which wrap the tier walks above and compose the two legs of a secondary lookup for you.
 
 `singleAsynchronously`, `idAsynchronously` and `listAsynchronously` are exposed alongside them, so a manager can add a lookup of its own shape without reimplementing the coalescing.
 
 Work runs on virtual threads, which suits blocking JDBC and Redis calls and means a synchronous caller waiting inside a lookup cannot starve a fixed pool.
 
-Keys are namespaced so an identifier lookup and an email lookup never collide, and string keys are uppercased before being used as an in-flight key so callers differing only in casing still share one lookup. That uppercasing is for matching callers against each other and nothing else — each tier is handed the caller's key and applies its own `resolveKey` to decide what it actually reads.
+Keys are namespaced so an identifier lookup and an email lookup never collide, and string keys are uppercased before being used as an in-flight key so callers differing only in casing still share one lookup. That uppercasing is for matching callers against each other and nothing else: each tier is handed the caller's key and applies its own `resolveKey` to decide what it actually reads.
 
-An identifier resolved from the database is written back to both tiers by the lookup itself, since the mapping is fully described by the key and the identifier — there is no entity to hand to a caching consumer.
+An identifier resolved from the database is written back to both tiers by the lookup itself, since the mapping is fully described by the key and the identifier, with no entity to hand to a caching consumer. For a `TenantEntity` it is written back to the local tier only: the identifier alone does not say which tenant the entity belongs to, so the Redis entry is left to the holder's own indexing once the entity is cached.
 
-`lookupAllValues` takes both a predicate and an equivalent jOOQ condition — one is applied in memory to the locally cached entities, the other in SQL. Identifiers already found locally are excluded from the query, so the database only returns what the cache missed, and the merged result is deduplicated by identifier. The Redis tier is deliberately not consulted: scraping it means reading and deserialising the entire namespace on every call, and every entity it would have supplied comes back from the query anyway.
+`lookupAllValues` takes both a predicate and an equivalent jOOQ condition: one is applied in memory to the locally cached entities, the other in SQL. Identifiers already found locally are excluded from the query, so the database only returns what the cache missed, and the merged result is deduplicated by identifier. The Redis tier is deliberately not consulted: scraping it means reading and deserialising the entire namespace on every call, and every entity it would have supplied comes back from the query anyway.
 
-Coalescing keys on the rendered condition, so two callers filtering on different values do not share a lookup — which also means a filter over a high-cardinality column rarely coalesces at all.
+Coalescing keys on the rendered condition, so two callers filtering on different values do not share a lookup, which also means a filter over a high-cardinality column rarely coalesces at all.
 
 ---
 
@@ -747,15 +823,18 @@ Coalescing keys on the rendered condition, so two callers filtering on different
 `DatabaseDriver` is abstract so you can subclass it and annotate the subclass for your own framework, keeping the library free of any framework's annotations. The subclass builds its own `HikariConfig` from wherever your application keeps configuration.
 
 ```java
+@Singleton
 public class MyDatabaseDriver extends DatabaseDriver {
 
     public MyDatabaseDriver(final DatabaseConfig databaseConfig) {
         super(databaseConfig.toHikariConfig(), new BatchQueueSettings());
+
+        this.connect();
     }
 }
 ```
 
-The driver, every repository and every manager are components — the container builds the graph, and each repository registers itself with `DatabaseApi` as it is constructed.
+The driver, every repository and every manager are components. Each repository takes its driver in its constructor, so the container builds the driver first, and connecting it from its own constructor means it is live before any repository runs its schema work.
 
 ```java
 @Repository
@@ -767,33 +846,21 @@ public class AccountRepository extends EntityRepository<Account> {
 }
 ```
 
-`connect()` is called once the container has finished wiring — from a startup listener, an `@PostConstruct`, or your plugin's enable:
+`connect()` opens the pool, builds the jOOQ context and batch queue, reads the database name from the server, and installs `pg_trgm`. Disconnect both drivers on shutdown:
 
 ```java
-@Singleton
-@RequiredArgsConstructor
-public class DatabaseInitializer {
-
-    private final MyDatabaseDriver databaseDriver;
-    private final MyRedisDriver redisDriver;
-
-    @PostConstruct
-    public void initialize() {
-        this.redisDriver.connect();
-        this.databaseDriver.connect();
-    }
-
-    @PreDestroy
-    public void terminate() {
-        this.databaseDriver.disconnect();
-        this.redisDriver.disconnect();
-    }
+@PreDestroy
+public void terminate() {
+    this.databaseDriver.disconnect();
+    this.redisDriver.disconnect();
 }
 ```
 
-`connect()` opens the pool, builds the jOOQ context and batch queue, installs `pg_trgm`, then creates and migrates every registered repository's table and indexes. That ordering is why it runs after the container has constructed the repositories rather than as part of the driver's own construction.
+`getDatabaseName()` returns the connected database's name, which prefixes every Redis namespace built from a repository on that driver. `getTenantId()` returns the driver's tenant, `null` by default; see [Tenancy](#tenancy).
 
-`DatabaseApi` is where that registry lives — static, because a repository needs somewhere to register at construction time, when the driver may not exist yet. It also exposes a readiness flag:
+An application can hold several drivers at once, such as one for a database every server shares and one for data local to a group of servers. Each is its own subclass, so the container can tell them apart, and each repository takes the driver for the database it belongs in.
+
+`DatabaseApi` keeps a static registry of every constructed repository, plus a readiness flag:
 
 ```java
 accountRepository.setLoaded(true);
@@ -803,7 +870,7 @@ if (DatabaseApi.isDatabaseLoaded()) {
 }
 ```
 
-Nothing marks a repository loaded on its own — call `setLoaded(true)` once that entity's startup work is done, and gate on `isDatabaseLoaded()` before the application starts serving.
+Nothing marks a repository loaded on its own. Call `setLoaded(true)` once that entity's startup work is done, and gate on `isDatabaseLoaded()` before the application starts serving.
 
 Two pgjdbc properties are applied automatically:
 
@@ -812,7 +879,7 @@ Two pgjdbc properties are applied automatically:
 | `stringtype=unspecified` | Lets Postgres coerce string binds into `jsonb` columns |
 | `reWriteBatchedInserts=true` | Folds a batch of identical inserts into one multi-row statement |
 
-`disconnect()` drains the batch queue before closing the pool, in that order — closing the pool first would lose every queued write.
+`disconnect()` drains the batch queue before closing the pool, in that order, because closing the pool first would lose every queued write.
 
 ### Redis
 
@@ -821,23 +888,16 @@ Two pgjdbc properties are applied automatically:
 public class MyRedisDriver extends RedisDriver {
 
     public MyRedisDriver(final RedisConfig redisConfig) {
-        super(redisConfig.getAddress(), redisConfig.getPort(), redisConfig.getPassword(), 500L);
+        super(redisConfig.getAddress(), redisConfig.getPort(), redisConfig.getUsername(), redisConfig.getPassword(), redisConfig.isSsl(), 500L);
+
+        this.connect();
     }
 }
 ```
 
-Injected wherever Redis is needed — into a `RedisStorage`, or directly for pub/sub. Its `connect()` runs alongside the database driver's, before anything touches it.
+Injected wherever Redis is needed, into a `RedisStorage` or directly for pub/sub. A username enables ACL authentication; with no username, a password alone is used.
 
-```java
-public class AccountIdRedisStorage extends RedisStorage<Account, Account> {
-
-    public AccountIdRedisStorage(final MyRedisDriver redisDriver) {
-        super(redisDriver, "account:id");
-    }
-}
-```
-
-Lettuce connections are thread-safe and multiplexed, so one connection serves every caller — there is no pool to size.
+Lettuce connections are thread-safe and multiplexed, so one connection serves every caller and there is no pool to size.
 
 ```java
 // Direct command access
@@ -858,15 +918,15 @@ final CompletableFuture<String> future = redisDriver.getAsyncResource(commands -
 
 `getAsyncResource` returns the command's own future, so nothing waits on a thread. It completes on Lettuce's event loop, which means any non-trivial continuation belongs on `thenApplyAsync` with an executor of your choosing rather than `thenApply`.
 
-A driver is connected once and not reused after `disconnect()` — the closed connections are kept rather than nulled, so work still in flight during shutdown fails with Lettuce's own closed-connection error instead of a null dereference.
+A driver is connected once and not reused after `disconnect()`. The closed connections are kept rather than nulled, so work still in flight during shutdown fails with Lettuce's own closed-connection error instead of a null dereference.
 
-The timeout is Lettuce's **command** timeout, not a connect timeout — every command waits at most that long before failing. Keep it short when commands run on a latency-sensitive thread.
+The timeout is Lettuce's **command** timeout, not a connect timeout: every command waits at most that long before failing. Keep it short when commands run on a latency-sensitive thread.
 
 ### Pub/Sub
 
 The Redis driver doubles as a message bus, and that is what keeps a multi-instance deployment's local caches honest. The local tier is per-instance, so an entity written on one instance would otherwise leave every other one holding its own copy until the TTL lapsed.
 
-`EntityHolder` wires this up itself. Every holder publishes on a channel named after its entity type, `Entity-Update-Account`, and `listenForEntityUpdates()` subscribes it to the same one, so two instances agree on the channel without being told what it is called.
+`EntityHolder` wires this up itself. Every holder publishes on a channel named after its entity type, `Entity-Update-Account`, and `listenForEntityUpdates()` subscribes it to the same one, so two instances agree on the channel without being told what it is called. A holder that shares its entity type with another holder, such as one per database, overrides `getUpdateChannel()` to prefix it with the database name.
 
 What travels is an `EntityUpdateDto`: the publishing instance's identifier, the entity's identifier, and the names of the columns that changed. Not the entity itself. Two writes racing means the older payload can land last, which would leave every instance holding a stale value with no way to notice. Naming the columns instead means the receiving side goes and reads whatever Redis currently holds, which is the winner of the race.
 
@@ -874,12 +934,13 @@ A receiving instance:
 
 1. ignores the message if it published it, rather than evicting what it just cached
 2. ignores it if it was not holding that entity, since there is nothing stale to drop
-3. resolves each column name back to its registered property and calls `deleteStaleStorage`, using its own stale copy's values
-4. calls `evictEntity`
+3. resolves each column name back to its registered property and calls `deleteStaleLocalStorage`, using its own stale copy's values
+4. reads the writer's copy back out of Redis and caches it locally, restoring the pin if the old copy was pinned
+5. evicts its local copy instead if Redis holds nothing, or holds an entity this instance's tenant cannot see
 
-That leaves Redis as the source of truth. The next lookup on that instance misses locally, finds the writer's copy in Redis, and caches it.
+That leaves Redis as the source of truth. Only the local tiers are touched on the receiving side: the writer already refreshed Redis, and every receiver writing the same keys back would race a second update landing behind the first.
 
-Two things follow from this. `evictEntity` must leave the Redis tier alone, or the instance deletes the very copy it is about to read. And a column arriving that resolves to no registered property is skipped rather than failing the message, which is what lets an instance running an older build stay up during a rolling deploy.
+A column arriving that resolves to no registered property is skipped rather than failing the message, which is what lets an instance running an older build stay up during a rolling deploy.
 
 Redis pub/sub is fire and forget. An instance disconnected during a publish never hears about the change and serves its local copy until the TTL lapses, so a reference or identifier storage with a null TTL will hold it indefinitely. Give the local tiers a TTL you are willing to be stale for; if that is not good enough, this is the point to move to Streams with consumer groups.
 
@@ -915,8 +976,13 @@ Secondary key (email, username)
     ↕ LocalEntityReferenceIdStorage / RedisEntityReferenceIdStorage (key → identifier)
     ↕ EntityHolder (identifier → entity, one cached copy)
 
+Tenant (TenantEntity)
+    ↕ DatabaseDriver#getTenantId (the reading tenant, null for standalone)
+    ↕ EntityRepository (tenant_id column, scoped reads)
+    ↕ RedisStorage#getVisibility (hides other tenants' entries)
+
 Write (updateEntity)
-    ↕ deleteStaleStorage (drop the reference entries going stale)
+    ↕ deleteStaleLocalStorage / deleteStaleRedisStorage (drop the reference entries going stale)
     ↕ cacheEntity (re-index under the new values)
     ↕ EntityRepository (write the columns that moved)
     ↕ EntityUpdateDto → RedisDriver pub/sub → every other instance
@@ -925,17 +991,19 @@ Write (updateEntity)
 | Layer | Responsibility |
 |---|---|
 | **Entity** | Business object with a UUID identity and an identifier constructor |
+| **TenantEntity** | An entity whose rows are scoped to a tenant, with `*` marking rows shared by every tenant |
 | **EntityProperty** | Binds a column to its getter, setter and SQL type; registry of an entity's full column set |
 | **ValueConverter** | Bidirectional conversion between a Java type and its storage type |
 | **EntityRepository** | Schema management, reads, and write queueing for one entity type |
 | **PendingWrite** | One entity's queued write, merged in place as further writes arrive |
 | **BatchQueue** | Coalesces, orders, chunks and commits every deferred write |
-| **DatabaseDriver** | Owns the pool, jOOQ context and batch queue; runs schema setup on connect |
+| **DatabaseDriver** | Owns the pool, jOOQ context and batch queue; reports the database name and the reading tenant |
 | **DatabaseApi** | Static registry of every constructed repository, plus the readiness flag |
 | **RedisDriver** | Shared Lettuce connection, command helpers and pub/sub |
 | **Storage** | Unified key-value cache contract with TTL, key normalisation and `index`/`unIndex` |
-| **LocalStorage** | In-process cache with lazy eviction, a periodic sweep and an optional size cap |
-| **RedisStorage** | Distributed cache with a per-namespace key index and chunked whole-namespace reads |
+| **LocalStorage** | In-process cache with lazy eviction, a periodic sweep, pinning and an optional size cap |
+| **IdRedisStorage** | The Redis identifier tier, namespaced by database and entity, with the tenant carried in the stored JSON |
+| **RedisStorage** | Distributed cache with a per-namespace key index, chunked whole-namespace reads and an optional visibility rule |
 | **LocalEntityReferenceIdStorage** | Local secondary key → identifier mapping, so the entity is cached once |
 | **RedisEntityReferenceIdStorage** | The same mapping shared across every instance |
 | **CacheEntry** | Cached value paired with a monotonic expiry |

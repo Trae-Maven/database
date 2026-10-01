@@ -3,12 +3,15 @@ package io.github.trae.database.repository;
 import io.github.trae.database.DatabaseApi;
 import io.github.trae.database.batch.enums.OperationType;
 import io.github.trae.database.driver.DatabaseDriver;
+import io.github.trae.database.entity.TenantEntity;
 import io.github.trae.database.entity.property.EntityProperty;
 import io.github.trae.database.repository.enums.IndexType;
+import io.github.trae.utilities.UtilJava;
 import lombok.Getter;
 import lombok.Setter;
 import org.jooq.Condition;
 import org.jooq.CreateTableElementListStep;
+import org.jooq.DataType;
 import org.jooq.Field;
 import org.jooq.Record;
 import org.jooq.SortField;
@@ -44,6 +47,14 @@ import java.util.UUID;
  * {@link #createTable()}, {@link #migrateSchema()} and {@link #createIndexes()}
  * across every registered repository during {@link DatabaseDriver#connect()}.</p>
  *
+ * <p>An entity implementing {@link TenantEntity} gets a built-in
+ * {@code tenant_id} column alongside its identifier, created, migrated and
+ * indexed automatically and written on every save. When the driver reports a
+ * tenant through {@link DatabaseDriver#getTenantId()}, every read is scoped to
+ * rows belonging to that tenant or shared by every tenant, so no query names the
+ * tenant itself. A subclass writing its own query wraps the condition in
+ * {@link #scope(Condition)} to get the same behaviour.</p>
+ *
  * @param <Entity> the entity type this repository serves
  * @see EntityProperty
  * @see io.github.trae.database.batch.BatchQueue
@@ -61,6 +72,24 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * target throughout the library.
      */
     public static final Field<UUID> IDENTIFIER_FIELD = DSL.field(DSL.name(IDENTIFIER_COLUMN), SQLDataType.UUID);
+
+    /**
+     * Name of the tenant column, present only on tables whose entity implements
+     * {@link TenantEntity}.
+     */
+    private static final String TENANT_COLUMN = "tenant_id";
+
+    /**
+     * The tenant field, written on every save and matched by every read of a
+     * tenant-scoped repository.
+     */
+    public static final Field<String> TENANT_FIELD = DSL.field(DSL.name(TENANT_COLUMN), SQLDataType.VARCHAR);
+
+    /**
+     * The tenant column's type. Defaults to shared, so rows that existed before
+     * the column was added stay visible to every tenant.
+     */
+    private static final DataType<String> TENANT_DATA_TYPE = SQLDataType.VARCHAR.nullable(false).defaultValue(TenantEntity.SHARED_TENANT_ID);
 
     /**
      * The driver supplying the jOOQ context and batch queue.
@@ -88,6 +117,12 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * row.
      */
     private final Constructor<Entity> entityConstructor;
+
+    /**
+     * Whether the entity implements {@link TenantEntity}, and so whether its
+     * table carries the tenant column.
+     */
+    private final boolean tenantEntity;
 
     /**
      * Whether this repository has finished loading whatever it needs at startup.
@@ -120,6 +155,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
         this.entityType = entityType;
         this.tableName = tableName;
         this.table = DSL.table(DSL.name(tableName.toLowerCase(Locale.ROOT)));
+        this.tenantEntity = TenantEntity.class.isAssignableFrom(entityType);
 
         try {
             this.entityConstructor = entityType.getDeclaredConstructor(UUID.class);
@@ -150,13 +186,18 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
 
     /**
      * Creates the table if it does not exist, with a column per persistent
-     * property plus the identifier primary key.
+     * property plus the identifier primary key, and the tenant column for a
+     * {@link TenantEntity}.
      *
      * <p>Does nothing to an existing table, including one whose columns no longer
      * match — {@link #migrateSchema()} handles additions from there.</p>
      */
     public void createTable() {
         CreateTableElementListStep createTableElementListStep = this.databaseDriver.getDslContext().createTableIfNotExists(this.getTable()).column(IDENTIFIER_FIELD, SQLDataType.UUID.nullable(false));
+
+        if (this.tenantEntity) {
+            createTableElementListStep = createTableElementListStep.column(TENANT_FIELD, TENANT_DATA_TYPE);
+        }
 
         for (final EntityProperty<? super Entity, ?> entityProperty : this.getPersistentEntityPropertyList()) {
             createTableElementListStep = createTableElementListStep.column(entityProperty.getField(), entityProperty.getDataType());
@@ -166,13 +207,18 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
     }
 
     /**
-     * Adds any persistent registered property that has no column yet.
+     * Adds any persistent registered property that has no column yet, and the
+     * tenant column for a {@link TenantEntity} whose table predates it.
      *
      * <p>Additive only. A column whose type has changed is left alone, and a
      * column whose property has been removed or made non-persistent is left in
      * place — so destructive schema changes have to be applied by hand.</p>
      */
     public void migrateSchema() {
+        if (this.tenantEntity) {
+            this.databaseDriver.getDslContext().alterTable(this.getTable()).addIfNotExists(DSL.name(TENANT_COLUMN), TENANT_DATA_TYPE).execute();
+        }
+
         this.getPersistentEntityPropertyList().forEach(entityProperty -> this.databaseDriver.getDslContext().alterTable(this.getTable()).addIfNotExists(DSL.name(entityProperty.getColumn()), entityProperty.getDataType()).execute());
     }
 
@@ -185,7 +231,8 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
 
     /**
      * Creates every index declared by {@link #getIndexes()} that does not exist
-     * yet.
+     * yet, plus a BTREE index on the tenant column for a {@link TenantEntity},
+     * since every scoped read filters on it.
      *
      * <p>Only persistent properties can be indexed, since non-persistent
      * properties have no corresponding database column.</p>
@@ -212,6 +259,41 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
                 case BRIN -> this.databaseDriver.getDslContext().execute("CREATE INDEX IF NOT EXISTS {0} ON {1} USING BRIN ({2})", DSL.name(indexName), this.getTable(), field);
             }
         });
+
+        if (this.tenantEntity) {
+            this.databaseDriver.getDslContext().createIndexIfNotExists(DSL.name("idx_%s_%s".formatted(this.tableName, TENANT_COLUMN))).on(this.getTable(), TENANT_FIELD).execute();
+        }
+    }
+
+    /**
+     * Returns whether reads on this repository are scoped to a tenant.
+     *
+     * <p>True when the entity implements {@link TenantEntity} and the driver
+     * reports a tenant. A standalone driver leaves every read unscoped.</p>
+     *
+     * @return {@code true} if reads are tenant-scoped
+     */
+    public boolean isTenantScoped() {
+        return this.tenantEntity && this.databaseDriver.getTenantId() != null;
+    }
+
+    /**
+     * Restricts a condition to rows visible to the driver's tenant.
+     *
+     * <p>Adds a match on the driver's tenant or the shared tenant when this
+     * repository is tenant-scoped, and returns the condition untouched
+     * otherwise. Every built-in read goes through this, and a subclass writing
+     * its own query should too.</p>
+     *
+     * @param condition the condition to restrict
+     * @return the scoped condition
+     */
+    protected Condition scope(final Condition condition) {
+        if (!this.isTenantScoped()) {
+            return condition;
+        }
+
+        return condition.and(TENANT_FIELD.in(TenantEntity.SHARED_TENANT_ID, this.databaseDriver.getTenantId()));
     }
 
     /**
@@ -220,7 +302,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @return every entity, in no particular order
      */
     public List<Entity> findAll() {
-        return this.databaseDriver.getDslContext().selectFrom(this.getTable()).fetch().map(this::build);
+        return this.databaseDriver.getDslContext().selectFrom(this.getTable()).where(this.scope(DSL.noCondition())).fetch().map(this::build);
     }
 
     /**
@@ -230,7 +312,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @return the entity, or empty if nothing matches
      */
     public Optional<Entity> findOne(final Condition condition) {
-        return this.databaseDriver.getDslContext().selectFrom(this.getTable()).where(condition).limit(1).fetchOptional().map(this::build);
+        return this.databaseDriver.getDslContext().selectFrom(this.getTable()).where(this.scope(condition)).limit(1).fetchOptional().map(this::build);
     }
 
     /**
@@ -267,7 +349,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
         return this.databaseDriver.getDslContext()
                 .select(IDENTIFIER_FIELD)
                 .from(this.getTable())
-                .where(entityProperty.getField().eq(value))
+                .where(this.scope(entityProperty.getField().eq(value)))
                 .limit(1)
                 .fetchOptional(IDENTIFIER_FIELD);
     }
@@ -279,7 +361,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @return the matching entities, empty if none
      */
     public List<Entity> findMany(final Condition condition) {
-        return this.databaseDriver.getDslContext().selectFrom(this.getTable()).where(condition).fetch().map(this::build);
+        return this.databaseDriver.getDslContext().selectFrom(this.getTable()).where(this.scope(condition)).fetch().map(this::build);
     }
 
     /**
@@ -315,7 +397,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @return the page's entities
      */
     public List<Entity> findPage(final Condition condition, final SortField<?> sortField, final int offset, final int limit) {
-        return this.databaseDriver.getDslContext().selectFrom(this.getTable()).where(condition == null ? DSL.noCondition() : condition).orderBy(sortField).offset(offset).limit(limit).fetch().map(this::build);
+        return this.databaseDriver.getDslContext().selectFrom(this.getTable()).where(this.scope(condition == null ? DSL.noCondition() : condition)).orderBy(sortField).offset(offset).limit(limit).fetch().map(this::build);
     }
 
     /**
@@ -329,7 +411,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @return the value, or empty if the row is absent or the value is null
      */
     public <Value> Optional<Value> findValue(final EntityProperty<? super Entity, Value> entityProperty, final UUID id) {
-        return this.databaseDriver.getDslContext().select(entityProperty.getField()).from(this.getTable()).where(IDENTIFIER_FIELD.eq(id)).fetchOptional(entityProperty.getField());
+        return this.databaseDriver.getDslContext().select(entityProperty.getField()).from(this.getTable()).where(this.scope(IDENTIFIER_FIELD.eq(id))).fetchOptional(entityProperty.getField());
     }
 
     /**
@@ -339,7 +421,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @return {@code true} if at least one row matches
      */
     public boolean exists(final Condition condition) {
-        return this.databaseDriver.getDslContext().fetchExists(DSL.selectOne().from(this.getTable()).where(condition));
+        return this.databaseDriver.getDslContext().fetchExists(DSL.selectOne().from(this.getTable()).where(this.scope(condition)));
     }
 
     /**
@@ -372,7 +454,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @return the row count
      */
     public long count() {
-        return this.databaseDriver.getDslContext().fetchCount(this.getTable());
+        return this.databaseDriver.getDslContext().fetchCount(this.getTable(), this.scope(DSL.noCondition()));
     }
 
     /**
@@ -382,7 +464,7 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * @return the matching row count
      */
     public long count(final Condition condition) {
-        return this.databaseDriver.getDslContext().fetchCount(this.getTable(), condition);
+        return this.databaseDriver.getDslContext().fetchCount(this.getTable(), this.scope(condition));
     }
 
     /**
@@ -390,6 +472,8 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      *
      * <p>For creating an entity, or for rewriting one wholesale. Non-persistent
      * properties are excluded because they have no corresponding database column.
+     * A {@link TenantEntity} also has its tenant written, with no tenant set
+     * stored as shared.
      * A partial change to an existing entity belongs in
      * {@code update(Entity, EntityProperty)} instead, which writes only what
      * changed.</p>
@@ -450,7 +534,8 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * <p>Constructs it from the row's identifier, then applies every persistent
      * property's setter. Non-persistent properties are excluded because they have
      * no corresponding database column. Any converter on a property's field runs
-     * here, so a value arrives in its Java form rather than its stored one.</p>
+     * here, so a value arrives in its Java form rather than its stored one. A
+     * {@link TenantEntity} also has its tenant applied from the row.</p>
      *
      * @param record the row to read
      * @return the reconstructed entity
@@ -459,6 +544,10 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
         final Entity entity = this.instantiate(record.get(IDENTIFIER_FIELD));
 
         this.getPersistentEntityPropertyList().forEach(entityProperty -> this.apply(entityProperty, entity, record));
+
+        if (this.tenantEntity) {
+            UtilJava.cast(TenantEntity.class, entity).setTenantId(record.get(TENANT_FIELD));
+        }
 
         return entity;
     }
@@ -514,12 +603,21 @@ public class EntityRepository<Entity extends io.github.trae.database.entity.Enti
      * Renders the given properties into a value map and hands the write to the
      * batch queue.
      *
+     * <p>A save of a {@link TenantEntity} carries its tenant as well, so the row
+     * is created or rewritten under the tenant the entity holds.</p>
+     *
      * @param entity             the entity being written
      * @param entityPropertyList the properties whose columns to write
      * @param operationType      the kind of statement to render
      */
     private void queue(final Entity entity, final List<EntityProperty<? super Entity, ?>> entityPropertyList, final OperationType operationType) {
-        this.databaseDriver.getBatchQueue().queue(this.tableName, IDENTIFIER_FIELD, entity.getId(), this.valueMap(entity, entityPropertyList), operationType);
+        final Map<Field<?>, Object> valueMap = this.valueMap(entity, entityPropertyList);
+
+        if (this.tenantEntity && operationType == OperationType.SAVE) {
+            valueMap.put(TENANT_FIELD, TenantEntity.resolveTenantId(entity));
+        }
+
+        this.databaseDriver.getBatchQueue().queue(this.tableName, IDENTIFIER_FIELD, entity.getId(), valueMap, operationType);
     }
 
     /**

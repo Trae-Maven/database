@@ -1,8 +1,11 @@
 package io.github.trae.database.storage;
 
 import io.github.trae.database.driver.RedisDriver;
+import io.github.trae.database.entity.TenantEntity;
+import io.github.trae.database.repository.EntityRepository;
 
 import java.util.UUID;
+import java.util.function.BiPredicate;
 
 /**
  * Redis counterpart to {@link LocalEntityReferenceIdStorage} — maps a secondary
@@ -28,30 +31,54 @@ import java.util.UUID;
  * entity can change needs {@link Storage#reIndex(Object, Object)} on update: the
  * new key is derivable, the old one is not.</p>
  *
+ * <p>The namespace is prefixed with the repository's database name, so two
+ * databases holding the same entity type never share entries.</p>
+ *
+ * <p>For a {@link TenantEntity}, every key is prefixed with the entity's tenant,
+ * so two tenants holding an entity under the same key never overwrite each
+ * other's entry in the shared Redis. Lookups resolve the prefix through
+ * {@link #getTenantKey(String, String)}, and when the repository is
+ * tenant-scoped every read, including {@link #keys()}, {@link #values()} and
+ * {@link #size()}, hides entries belonging to another tenant.</p>
+ *
  * @param <Entity> the entity type the identifiers belong to
  */
 public abstract class RedisEntityReferenceIdStorage<Entity extends io.github.trae.database.entity.Entity> extends RedisStorage<UUID, Entity> {
 
     /**
+     * The visibility rule, built once since the driver's tenant is fixed, or
+     * {@code null} when the repository is not tenant-scoped.
+     */
+    private final BiPredicate<String, UUID> visibility;
+
+    /**
      * Creates a storage over the given connection and namespace.
      *
-     * @param redisDriver the connection used for every command
-     * @param namespace   the prefix applied to every key this storage owns
+     * @param redisDriver      the connection used for every command
+     * @param entityRepository the repository serving the entity, constructed
+     *                         after its driver has connected
+     * @param namespace        the prefix applied to every key this storage owns,
+     *                         itself prefixed with the database name
      */
-    protected RedisEntityReferenceIdStorage(final RedisDriver redisDriver, final String namespace) {
-        super(redisDriver, namespace);
+    protected RedisEntityReferenceIdStorage(final RedisDriver redisDriver, final EntityRepository<Entity> entityRepository, final String namespace) {
+        super(redisDriver, "%s:%s".formatted(entityRepository.getDatabaseDriver().getDatabaseName(), namespace));
+
+        final String tenantId = entityRepository.getDatabaseDriver().getTenantId();
+
+        this.visibility = entityRepository.isTenantScoped() ? (key, id) -> key.startsWith(this.resolveKey(this.getTenantKey(TenantEntity.SHARED_TENANT_ID, ""))) || key.startsWith(this.resolveKey(this.getTenantKey(tenantId, ""))) : null;
     }
 
     /**
      * {@inheritDoc}
      *
-     * <p>Stores the entity's identifier under the key derived from it. An entity
-     * with no key is ignored, since {@link Storage#put(Object, Object)} treats a
-     * null key as a no-op.</p>
+     * <p>Stores the entity's identifier under the key derived from it, prefixed
+     * with its tenant for a {@link TenantEntity}. An entity with no key is
+     * ignored, since {@link Storage#put(Object, Object)} treats a null key as a
+     * no-op.</p>
      */
     @Override
     public void index(final Entity entity) {
-        this.put(this.getKey(entity), entity.getId());
+        this.put(this.getTenantKey(entity), entity.getId());
     }
 
     /**
@@ -63,7 +90,43 @@ public abstract class RedisEntityReferenceIdStorage<Entity extends io.github.tra
      */
     @Override
     public void unIndex(final Entity entity) {
-        this.remove(this.getKey(entity));
+        this.remove(this.getTenantKey(entity));
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>The previous key is given unprefixed, the same form
+     * {@link #getKey(io.github.trae.database.entity.Entity)} returns, and is
+     * prefixed with the entity's tenant before removal.</p>
+     */
+    @Override
+    public void reIndex(final Entity entity, final String previousKey) {
+        this.remove(this.getTenantKey(TenantEntity.resolveTenantId(entity), previousKey));
+        this.index(entity);
+    }
+
+    /**
+     * Returns a key prefixed with a tenant.
+     *
+     * @param tenantId the tenant, or {@code null} for no prefix
+     * @param key      the unprefixed key
+     * @return the tenant key, or the key unchanged when the tenant or key is
+     * {@code null}
+     */
+    public final String getTenantKey(final String tenantId, final String key) {
+        return tenantId == null || key == null ? key : "%s:%s".formatted(tenantId, key);
+    }
+
+    /**
+     * Returns the key an entity is filed under, prefixed with its tenant for a
+     * {@link TenantEntity}.
+     *
+     * @param entity the entity to derive a key from
+     * @return the tenant key, or {@code null} if the entity has no key
+     */
+    public final String getTenantKey(final Entity entity) {
+        return this.getTenantKey(TenantEntity.resolveTenantId(entity), this.getKey(entity));
     }
 
     /**
@@ -83,6 +146,17 @@ public abstract class RedisEntityReferenceIdStorage<Entity extends io.github.tra
     @Override
     protected UUID deserialize(final String value) {
         return UUID.fromString(value);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Hides entries filed under another tenant's prefix when the repository
+     * is tenant-scoped.</p>
+     */
+    @Override
+    protected final BiPredicate<String, UUID> getVisibility() {
+        return this.visibility;
     }
 
     /**

@@ -9,12 +9,14 @@ import lombok.CustomLog;
 import lombok.Getter;
 
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 
 /**
@@ -41,6 +43,14 @@ import java.util.function.Consumer;
  * schema change poisons nothing and nothing is left behind to fail the same way
  * on the next read. The entity is simply refetched from the database and cached
  * again in its new shape.</p>
+ *
+ * <p>A subclass may override {@link #getVisibility()} to expose only some of the
+ * namespace's entries, such as those belonging to one tenant. Every read then
+ * applies it: {@link #get(String)} and {@link #contains(String)} report a hidden
+ * entry as absent, {@link #keys()}, {@link #values()} and {@link #size()} skip
+ * hidden entries, and {@link #clear()} removes visible entries only. Hidden
+ * entries are left untouched rather than evicted, since they are valid for
+ * whoever can see them.</p>
  *
  * <p>Every collection returned is unmodifiable, matching {@link LocalStorage}.</p>
  *
@@ -125,6 +135,8 @@ public abstract class RedisStorage<Value, IndexValue> implements Storage<String,
      * majority of misses are keys that were never cached, and pruning each one
      * would double the cost of every cold lookup. Stale index entries are
      * cleaned up by {@link #keys()}, {@link #values()} and {@link #size()}.</p>
+     *
+     * <p>An entry hidden by {@link #getVisibility()} is reported as absent.</p>
      */
     @Override
     public Optional<Value> get(final String key) {
@@ -145,14 +157,26 @@ public abstract class RedisStorage<Value, IndexValue> implements Storage<String,
             return Optional.empty();
         }
 
+        if (!this.isVisible(resolvedKey, deserializedValue)) {
+            return Optional.empty();
+        }
+
         return Optional.of(deserializedValue);
     }
 
     /**
      * {@inheritDoc}
+     *
+     * <p>A plain {@code EXISTS} when every entry is visible. When
+     * {@link #getVisibility()} applies, the entry is read and checked instead,
+     * so a hidden entry is reported as absent.</p>
      */
     @Override
     public boolean contains(final String key) {
+        if (this.getVisibility() != null) {
+            return this.get(key).isPresent();
+        }
+
         final String resolvedKey = this.resolveValidKey(key);
         if (resolvedKey == null) {
             return false;
@@ -165,10 +189,16 @@ public abstract class RedisStorage<Value, IndexValue> implements Storage<String,
      * {@inheritDoc}
      *
      * <p>Reads the namespace index, then verifies each key with chunked
-     * {@code MGET}s, dropping any whose value has expired.</p>
+     * {@code MGET}s, dropping any whose value has expired. When
+     * {@link #getVisibility()} applies, each value is also decoded and checked,
+     * and only the keys of visible entries are returned.</p>
      */
     @Override
     public Set<String> keys() {
+        if (this.getVisibility() != null) {
+            return Collections.unmodifiableSet(this.entryMap().keySet());
+        }
+
         final Set<String> keySet = new HashSet<>(this.indexKeySet());
         if (keySet.isEmpty()) {
             return Collections.emptySet();
@@ -195,55 +225,20 @@ public abstract class RedisStorage<Value, IndexValue> implements Storage<String,
      *
      * <p>Fetches every indexed key in chunked {@code MGET}s and deserialises the
      * values that are still present, pruning expired keys from the index and
-     * evicting any that will not decode.</p>
+     * evicting any that will not decode. Entries hidden by
+     * {@link #getVisibility()} are skipped.</p>
      */
     @Override
     public List<Value> values() {
-        final Set<String> keySet = this.indexKeySet();
-        if (keySet.isEmpty()) {
-            return Collections.emptyList();
-        }
-
-        final List<Value> valueList = new ArrayList<>();
-        final Set<String> expiredKeySet = new HashSet<>();
-        final Set<String> corruptKeySet = new HashSet<>();
-
-        this.forEachEntry(keySet, keyValue -> {
-            final String key = this.unNamespaceKey(keyValue.getKey());
-
-            if (!keyValue.hasValue()) {
-                expiredKeySet.add(key);
-                return;
-            }
-
-            final Value value = this.deserializeOrNull(key, keyValue.getValue());
-
-            if (value == null) {
-                corruptKeySet.add(key);
-                return;
-            }
-
-            valueList.add(value);
-        });
-
-        if (!expiredKeySet.isEmpty()) {
-            this.pruneIndex(expiredKeySet);
-        }
-
-        if (!corruptKeySet.isEmpty()) {
-            this.forEachChunk(corruptKeySet, namespacedKeys -> this.redisDriver.useResource(commands -> commands.unlink(namespacedKeys)));
-            this.pruneIndex(corruptKeySet);
-        }
-
-        return Collections.unmodifiableList(valueList);
+        return List.copyOf(this.entryMap().values());
     }
 
     /**
      * {@inheritDoc}
      *
-     * <p>Counts only keys whose values still exist, pruning the index of any that
-     * have expired. Not a plain {@code SCARD}, since the index can outlive the
-     * entries it names.</p>
+     * <p>Counts only keys whose values still exist and are visible, pruning the
+     * index of any that have expired. Not a plain {@code SCARD}, since the index
+     * can outlive the entries it names.</p>
      */
     @Override
     public long size() {
@@ -257,12 +252,27 @@ public abstract class RedisStorage<Value, IndexValue> implements Storage<String,
      * {@code UNLINK} frees the values on a background thread, so a large
      * namespace does not stall Redis.</p>
      *
+     * <p>When {@link #getVisibility()} applies, only the visible entries are
+     * unlinked and dropped from the index, and the index itself is kept for the
+     * entries this storage cannot see.</p>
+     *
      * <p>Not atomic — the member keys are read first, so an entry written by
      * another server between the read and the unlink survives, orphaned from the
      * index until its time-to-live runs out.</p>
      */
     @Override
     public void clear() {
+        if (this.getVisibility() != null) {
+            final Set<String> keySet = this.keys();
+
+            if (!keySet.isEmpty()) {
+                this.forEachChunk(keySet, namespacedKeys -> this.redisDriver.useResource(commands -> commands.unlink(namespacedKeys)));
+                this.pruneIndex(keySet);
+            }
+
+            return;
+        }
+
         final Set<String> keySet = this.indexKeySet();
 
         if (!keySet.isEmpty()) {
@@ -287,6 +297,83 @@ public abstract class RedisStorage<Value, IndexValue> implements Storage<String,
     public void reIndex(final IndexValue indexValue, final String previousKey) {
         this.remove(previousKey);
         this.index(indexValue);
+    }
+
+    /**
+     * Returns the rule deciding which entries this storage exposes.
+     *
+     * <p>Tested against each entry's resolved key and decoded value. The default
+     * of {@code null} exposes every entry and lets {@link #keys()} and
+     * {@link #contains(String)} skip decoding values altogether.</p>
+     *
+     * @return the visibility rule, or {@code null} to expose every entry
+     */
+    protected BiPredicate<String, Value> getVisibility() {
+        return null;
+    }
+
+    /**
+     * Returns whether an entry passes {@link #getVisibility()}.
+     *
+     * @param key   the resolved key
+     * @param value the decoded value
+     * @return {@code true} if the entry is visible
+     */
+    private boolean isVisible(final String key, final Value value) {
+        final BiPredicate<String, Value> visibility = this.getVisibility();
+
+        return visibility == null || visibility.test(key, value);
+    }
+
+    /**
+     * Reads every live, decodable, visible entry in the namespace.
+     *
+     * <p>Fetches every indexed key in chunked {@code MGET}s, pruning expired keys
+     * from the index and evicting any value that will not decode. Hidden entries
+     * are skipped without being evicted.</p>
+     *
+     * @return the visible entries, by resolved key
+     */
+    private Map<String, Value> entryMap() {
+        final Set<String> keySet = this.indexKeySet();
+        if (keySet.isEmpty()) {
+            return Collections.emptyMap();
+        }
+
+        final Map<String, Value> entryMap = new LinkedHashMap<>();
+        final Set<String> expiredKeySet = new HashSet<>();
+        final Set<String> corruptKeySet = new HashSet<>();
+
+        this.forEachEntry(keySet, keyValue -> {
+            final String key = this.unNamespaceKey(keyValue.getKey());
+
+            if (!keyValue.hasValue()) {
+                expiredKeySet.add(key);
+                return;
+            }
+
+            final Value value = this.deserializeOrNull(key, keyValue.getValue());
+
+            if (value == null) {
+                corruptKeySet.add(key);
+                return;
+            }
+
+            if (this.isVisible(key, value)) {
+                entryMap.put(key, value);
+            }
+        });
+
+        if (!expiredKeySet.isEmpty()) {
+            this.pruneIndex(expiredKeySet);
+        }
+
+        if (!corruptKeySet.isEmpty()) {
+            this.forEachChunk(corruptKeySet, namespacedKeys -> this.redisDriver.useResource(commands -> commands.unlink(namespacedKeys)));
+            this.pruneIndex(corruptKeySet);
+        }
+
+        return entryMap;
     }
 
     /**

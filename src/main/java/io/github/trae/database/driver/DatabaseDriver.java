@@ -36,6 +36,11 @@ import org.jooq.impl.DSL;
  * own dependency injection framework, keeping the library itself free of any
  * framework's annotations.</p>
  *
+ * <p>A subclass may also override {@link #getTenantId()} to scope every
+ * {@link io.github.trae.database.entity.TenantEntity} repository on this driver
+ * to one tenant. The default returns {@code null}, which leaves the driver
+ * standalone with no scoping applied.</p>
+ *
  * @see BatchQueue
  * @see EntityRepository
  * @see DatabaseApi
@@ -72,10 +77,22 @@ public abstract class DatabaseDriver implements Connector {
     private BatchQueue batchQueue;
 
     /**
+     * The name of the database the pool is connected to, read from the server
+     * on {@link #connect()}.
+     *
+     * <p>Prefixes every Redis key built from a repository on this driver, so two
+     * databases holding the same entity type never share cache entries through
+     * a shared Redis.</p>
+     */
+    @Getter
+    private String databaseName;
+
+    /**
      * Opens the pool and brings the schema up to date.
      *
      * <p>Runs, in order: pgjdbc property setup, pool creation, jOOQ context and
-     * batch queue creation, {@code pg_trgm} installation, then
+     * batch queue creation, reading the database name, {@code pg_trgm}
+     * installation, then
      * {@link EntityRepository#createTable()},
      * {@link EntityRepository#migrateSchema()} and
      * {@link EntityRepository#createIndexes()} across every repository held by
@@ -94,8 +111,23 @@ public abstract class DatabaseDriver implements Connector {
 
         this.dslContext = DSL.using(this.dataSource, SQLDialect.POSTGRES, new Settings().withExecuteLogging(false).withRenderSchema(false));
         this.batchQueue = new BatchQueue(this.dslContext, this.batchQueueSettings);
+        this.databaseName = this.dslContext.fetchValue(DSL.currentCatalog());
 
         this.dslContext.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+    }
+
+    /**
+     * Returns the tenant this driver reads and writes tenant entities as.
+     *
+     * <p>Every repository on this driver whose entity implements
+     * {@link io.github.trae.database.entity.TenantEntity} scopes its reads to
+     * rows belonging to this tenant or shared by every tenant. Read on every
+     * query, so the value must stay fixed for the life of the driver.</p>
+     *
+     * @return the tenant, or {@code null} for a standalone driver with no scoping
+     */
+    public String getTenantId() {
+        return null;
     }
 
     /**

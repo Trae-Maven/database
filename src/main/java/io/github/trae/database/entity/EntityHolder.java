@@ -51,6 +51,11 @@ import java.util.concurrent.CompletableFuture;
  * between instances: the writer refreshes it, the others drop what they were
  * holding and read it back on their next lookup.</p>
  *
+ * <p>For a {@link TenantEntity}, the repository already scopes every database
+ * read to this holder's tenant. Redis is the one tier shared across tenants, so
+ * an entity read from it, whether by lookup or on an update message, is dropped
+ * when {@link #isVisible} says it belongs to another tenant.</p>
+ *
  * @param <Entity>     the entity type held
  * @param <Repository> the repository type serving it
  * @see LookupProvider
@@ -104,6 +109,31 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
     @SuppressWarnings("unchecked")
     default Class<Entity> getEntityType() {
         return (Class<Entity>) UtilGeneric.getGenericParameter(this.getClass(), EntityHolder.class, 0);
+    }
+
+    /**
+     * Returns the tenant this holder reads as, taken from its repository's
+     * driver.
+     *
+     * @return the tenant, or {@code null} when standalone
+     */
+    default String getTenantId() {
+        return this.getRepository().getDatabaseDriver().getTenantId();
+    }
+
+    /**
+     * Returns whether this holder's tenant may see an entity.
+     *
+     * <p>Applied to every entity read from Redis, since that tier is shared by
+     * every tenant. Always true for a standalone holder or a non-tenant
+     * entity.</p>
+     *
+     * @param entity the entity to check
+     * @return {@code true} if the entity is visible to this holder's tenant
+     * @see TenantEntity#isVisible(io.github.trae.database.entity.Entity, String)
+     */
+    default boolean isVisible(final Entity entity) {
+        return TenantEntity.isVisible(entity, this.getTenantId());
     }
 
     /**
@@ -380,7 +410,8 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      *
      * <p>Redis coming back empty means the entity is gone or its entry lapsed,
      * with nothing to replace the stale copy with, so that copy is dropped
-     * instead.</p>
+     * instead. The same happens when the updated entity is no longer visible to
+     * this holder's tenant.</p>
      *
      * <p>Only the local tiers are touched. The writer already refreshed Redis,
      * and every receiver writing the same keys back would undo that work and race
@@ -422,7 +453,7 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
                     this.deleteStaleLocalStorage(entity, entityProperty);
                 }
 
-                idRedisStorage.get(entityUpdateDto.getId().toString()).ifPresentOrElse(updatedEntity -> {
+                idRedisStorage.get(entityUpdateDto.getId().toString()).filter(this::isVisible).ifPresentOrElse(updatedEntity -> {
                     this.cacheLocalEntity(updatedEntity);
 
                     if (pinned) {

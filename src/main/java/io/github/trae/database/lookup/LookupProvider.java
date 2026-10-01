@@ -1,6 +1,7 @@
 package io.github.trae.database.lookup;
 
 import io.github.trae.database.entity.EntityHolder;
+import io.github.trae.database.entity.TenantEntity;
 import io.github.trae.database.repository.EntityRepository;
 import io.github.trae.database.storage.LocalEntityReferenceIdStorage;
 import io.github.trae.database.storage.LocalStorage;
@@ -61,6 +62,11 @@ import java.util.stream.Stream;
  * each tier is handed the caller's key and applies its own {@code resolveKey} to
  * decide what it actually reads or writes under.</p>
  *
+ * <p>For a {@link TenantEntity}, Redis is the one tier shared across tenants.
+ * An entity read from it is treated as a miss when it belongs to another
+ * tenant, and a reference read from it tries the holder's own tenant key first,
+ * then the shared one.</p>
+ *
  * @param <Entity> the entity type this provider resolves
  * @see EntityHolder
  */
@@ -119,6 +125,9 @@ public class LookupProvider<Entity extends io.github.trae.database.entity.Entity
      * <p>An invalid namespace or key completes immediately with empty rather than
      * scheduling work.</p>
      *
+     * <p>A Redis hit the holder's tenant cannot see is treated as a miss, falling
+     * through to the database, which is already scoped to that tenant.</p>
+     *
      * <p>The in-flight key is uppercased, so a namespace served by a
      * case-sensitive storage would coalesce two callers that should not share a
      * lookup. Every storage keyed on text is case-insensitive; identifiers render
@@ -151,7 +160,7 @@ public class LookupProvider<Entity extends io.github.trae.database.entity.Entity
             }
 
             if (redisStorage != null) {
-                final Optional<Entity> redisEntityOptional = redisStorage.get(key.toString());
+                final Optional<Entity> redisEntityOptional = redisStorage.get(key.toString()).filter(this.entityHolder::isVisible);
 
                 if (redisEntityOptional.isPresent()) {
                     if (storageAddConsumer != null) {
@@ -207,6 +216,12 @@ public class LookupProvider<Entity extends io.github.trae.database.entity.Entity
      * caller-supplied consumer, since the mapping is fully described by the key
      * and the identifier — there is no entity to hand anywhere.</p>
      *
+     * <p>For a {@link TenantEntity}, Redis is read under the holder's own tenant
+     * key first, then the shared one, and a database hit is written back to the
+     * local tier only. The identifier alone does not say which tenant the entity
+     * belongs to, so the Redis entry is left to the holder's own indexing once
+     * the entity itself is cached.</p>
+     *
      * @param <Key>                      the lookup key type
      * @param namespace                  distinguishes this lookup from others on
      *                                   the same entity
@@ -232,7 +247,7 @@ public class LookupProvider<Entity extends io.github.trae.database.entity.Entity
             }
 
             if (redisStorage != null) {
-                final Optional<UUID> redisIdOptional = redisStorage.get(key.toString());
+                final Optional<UUID> redisIdOptional = this.getRedisId(redisStorage, key.toString());
 
                 if (redisIdOptional.isPresent()) {
                     if (localStorage != null) {
@@ -251,7 +266,7 @@ public class LookupProvider<Entity extends io.github.trae.database.entity.Entity
                         localStorage.put(key, id);
                     }
 
-                    if (redisStorage != null) {
+                    if (redisStorage != null && !this.entityHolder.getRepository().isTenantEntity()) {
                         redisStorage.put(key.toString(), id);
                     }
                 });
@@ -359,6 +374,32 @@ public class LookupProvider<Entity extends io.github.trae.database.entity.Entity
      */
     public CompletableFuture<List<Entity>> listAsynchronously(final String namespace, final String key, final Supplier<List<Entity>> supplier) {
         return this.coalesceAsynchronously(this.listInFlightMap, namespace, key, supplier);
+    }
+
+    /**
+     * Reads an identifier from a Redis reference tier, under the tenant key for
+     * a {@link TenantEntity}.
+     *
+     * <p>A non-tenant entity reads the key as given. A tenant entity reads the
+     * holder's own tenant key first, falling back to the shared tenant key, so an
+     * entry belonging to this tenant takes precedence over a shared one. A
+     * standalone holder reads the shared tenant key only.</p>
+     *
+     * @param redisStorage the Redis reference tier
+     * @param key          the key as supplied
+     * @return the identifier, or empty if neither key holds one
+     */
+    private Optional<UUID> getRedisId(final RedisEntityReferenceIdStorage<Entity> redisStorage, final String key) {
+        if (!this.entityHolder.getRepository().isTenantEntity()) {
+            return redisStorage.get(key);
+        }
+
+        final String tenantId = this.entityHolder.getTenantId();
+        if (tenantId == null || tenantId.equals(TenantEntity.SHARED_TENANT_ID)) {
+            return redisStorage.get(redisStorage.getTenantKey(TenantEntity.SHARED_TENANT_ID, key));
+        }
+
+        return redisStorage.get(redisStorage.getTenantKey(tenantId, key)).or(() -> redisStorage.get(redisStorage.getTenantKey(TenantEntity.SHARED_TENANT_ID, key)));
     }
 
     /**
