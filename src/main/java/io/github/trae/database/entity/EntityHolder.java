@@ -115,7 +115,9 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      *
      * @param entity the entity to cache
      */
-    void cacheLocalEntity(final Entity entity);
+    default void cacheLocalEntity(final Entity entity) {
+        this.getIdLocalStorage().index(entity);
+    }
 
     /**
      * Indexes the entity in every Redis tier.
@@ -126,7 +128,11 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      *
      * @param entity the entity to cache
      */
-    void cacheRedisEntity(final Entity entity);
+    default void cacheRedisEntity(final Entity entity) {
+        if (this.getIdRedisStorage() != null) {
+            this.getIdRedisStorage().index(entity);
+        }
+    }
 
     /**
      * Drops the entity from every local tier.
@@ -136,7 +142,9 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      *
      * @param entity the entity to evict
      */
-    void evictLocalEntity(final Entity entity);
+    default void evictLocalEntity(final Entity entity) {
+        this.getIdLocalStorage().unIndex(entity);
+    }
 
     /**
      * Drops the entity from every Redis tier.
@@ -146,7 +154,11 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      *
      * @param entity the entity to evict
      */
-    void evictRedisEntity(final Entity entity);
+    default void evictRedisEntity(final Entity entity) {
+        if (this.getIdRedisStorage() != null) {
+            this.getIdRedisStorage().unIndex(entity);
+        }
+    }
 
     /**
      * Pins the entity in every local tier maintained by this holder.
@@ -161,7 +173,9 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      *
      * @param entity the entity to pin locally
      */
-    void pinLocalEntity(final Entity entity);
+    default void pinLocalEntity(final Entity entity) {
+        this.getIdLocalStorage().pin(entity.getId());
+    }
 
     /**
      * Unpins the entity from every local tier maintained by this holder.
@@ -175,7 +189,9 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      *
      * @param entity the entity to unpin locally
      */
-    void unpinLocalEntity(final Entity entity);
+    default void unpinLocalEntity(final Entity entity) {
+        this.getIdLocalStorage().unpin(entity.getId());
+    }
 
     /**
      * Writes the entity into every tier this holder maintains.
@@ -217,7 +233,8 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      * @param entity   the entity whose entries are going stale
      * @param property the property whose entries to remove
      */
-    void deleteStaleLocalStorage(final Entity entity, final EntityProperty<? super Entity, ?> property);
+    default void deleteStaleLocalStorage(final Entity entity, final EntityProperty<? super Entity, ?> property) {
+    }
 
     /**
      * Removes the Redis reference entries a single property indexes the entity
@@ -230,7 +247,8 @@ public interface EntityHolder<Entity extends io.github.trae.database.entity.Enti
      * @param entity   the entity whose entries are going stale
      * @param property the property whose entries to remove
      */
-    void deleteStaleRedisStorage(final Entity entity, final EntityProperty<? super Entity, ?> property);
+    default void deleteStaleRedisStorage(final Entity entity, final EntityProperty<? super Entity, ?> property) {
+    }
 
     /**
      * The channel this entity's updates are published on.
